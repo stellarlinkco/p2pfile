@@ -1,0 +1,26 @@
+source_max_lines: 300
+test_max_lines: 400
+forbidden_name_suffixes:
+  - "_v1"
+  - "_v2"
+  - "_new"
+  - "_old"
+  - "_backup"
+  - "_temp"
+  - "_copy"
+  - "_final"
+ignored_directories:
+  - ".git"
+  - "node_modules"
+  - "dist"
+  - "coverage"
+  - "playwright-report"
+  - "test-results"
+dependency_boundary_rules:
+  "apps/web":
+    - "apps/signal"
+  "apps/signal":
+    - "apps/web"
+  "packages/shared":
+    - "apps/web"
+    - "apps/signal"

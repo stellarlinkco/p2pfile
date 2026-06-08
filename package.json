@@ -1,0 +1,32 @@
+{
+  "name": "p2p-file",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "prepare": "bun run scripts/install-hooks.ts",
+    "guard:names": "bun run scripts/check-naming.ts",
+    "guard:length": "bun run scripts/check-file-length.ts",
+    "guard:boundaries": "bun run scripts/check-dependency-boundaries.ts",
+    "guard:structure": "bun run guard:length && bun run guard:boundaries",
+    "dev:web": "bun run --filter @p2pfile/web dev",
+    "dev:signal": "bun run --filter @p2pfile/signal dev",
+    "lint": "bun run guard:names && bun run guard:structure && biome check .",
+    "format": "biome format --write .",
+    "typecheck": "bun run --filter @p2pfile/shared typecheck && bun run --filter @p2pfile/signal typecheck && bun run --filter @p2pfile/web typecheck",
+    "test:unit": "bun test",
+    "test:e2e": "playwright test",
+    "test": "bun run test:unit && bun run test:e2e",
+    "build": "bun run --filter @p2pfile/shared build && bun run --filter @p2pfile/signal build && bun run --filter @p2pfile/web build",
+    "check": "bun run lint && bun run typecheck && bun run test && bun run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
+    "@playwright/test": "^1.54.2",
+    "@types/bun": "latest",
+    "typescript": "^5.9.2"
+  }
+}
