@@ -1,0 +1,1264 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper" data-view="split" data-density="comfortable" data-motion="on">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>P2P File Frontend Redesign</title>
+    <meta
+      name="description"
+      content="P2P File v1 frontend redesign prototype for sender and receiver surfaces."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: oklch(97% 0.008 84);
+        --bg-2: oklch(94% 0.01 84);
+        --panel: oklch(99% 0.005 84 / 0.82);
+        --panel-strong: oklch(100% 0 0 / 0.96);
+        --text: oklch(22% 0.02 251);
+        --muted: oklch(50% 0.02 251);
+        --soft: oklch(62% 0.016 251);
+        --border: oklch(78% 0.02 251 / 0.6);
+        --accent: oklch(66% 0.15 186);
+        --accent-strong: oklch(58% 0.17 186);
+        --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+        --good: oklch(68% 0.16 152);
+        --warn: oklch(72% 0.14 83);
+        --shadow: 0 28px 90px color-mix(in srgb, var(--text) 18%, transparent);
+        --radius-xl: 30px;
+        --radius-lg: 22px;
+        --radius-md: 16px;
+        --radius-sm: 12px;
+        --content-gap: 24px;
+        --section-gap: 20px;
+        --copy-size: 16px;
+        --lift: 1;
+        --motion-scale: 1;
+      }
+
+      html[data-theme="midnight"] {
+        color-scheme: dark;
+        --bg: oklch(18% 0.024 249);
+        --bg-2: oklch(15.5% 0.02 249);
+        --panel: oklch(20.5% 0.022 249 / 0.82);
+        --panel-strong: oklch(23% 0.022 249 / 0.98);
+        --text: oklch(97% 0.01 250);
+        --muted: oklch(77% 0.015 250);
+        --soft: oklch(66% 0.013 250);
+        --border: oklch(36% 0.02 250 / 0.8);
+        --accent: oklch(74% 0.16 182);
+        --accent-strong: oklch(67% 0.18 182);
+        --shadow: 0 28px 100px color-mix(in srgb, black 52%, transparent);
+      }
+
+      html[data-theme="contrast"] {
+        color-scheme: dark;
+        --bg: oklch(12% 0.01 258);
+        --bg-2: oklch(15% 0.012 258);
+        --panel: oklch(18% 0.012 258 / 0.95);
+        --panel-strong: oklch(21% 0.012 258 / 0.98);
+        --text: oklch(99% 0 0);
+        --muted: oklch(84% 0.01 258);
+        --soft: oklch(72% 0.01 258);
+        --border: oklch(46% 0.012 258 / 0.95);
+        --accent: oklch(82% 0.18 190);
+        --accent-strong: oklch(76% 0.2 190);
+        --shadow: 0 30px 110px color-mix(in srgb, black 68%, transparent);
+      }
+
+      html[data-density="compact"] {
+        --content-gap: 18px;
+        --section-gap: 16px;
+        --copy-size: 15px;
+      }
+
+      html[data-density="relaxed"] {
+        --content-gap: 30px;
+        --section-gap: 24px;
+        --copy-size: 17px;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; }
+      body {
+        min-width: 320px;
+        background:
+          radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 32%),
+          radial-gradient(circle at 86% 12%, color-mix(in srgb, var(--soft) 12%, transparent), transparent 26%),
+          linear-gradient(180deg, var(--bg), var(--bg-2));
+        color: var(--text);
+        font-family: "Noto Sans SC", "Space Grotesk", system-ui, sans-serif;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a { color: inherit; text-decoration: none; }
+      button, input, select, textarea { font: inherit; }
+      ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+
+      .shell {
+        min-height: 100dvh;
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        backdrop-filter: blur(20px);
+        background: color-mix(in srgb, var(--bg) 74%, transparent);
+        border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+      }
+
+      .topbar-inner {
+        max-width: 1480px;
+        margin: 0 auto;
+        padding: 18px 24px;
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 1.2fr auto;
+        align-items: center;
+      }
+
+      .brand-row {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+
+      .brand-mark {
+        width: 42px;
+        height: 42px;
+        border-radius: 14px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 20%, transparent), var(--panel-strong));
+        border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+        box-shadow: var(--shadow);
+        font-family: "Space Grotesk", sans-serif;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+
+      .title-block { display: grid; gap: 4px; }
+      .eyebrow {
+        font-size: 12px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--soft);
+        font-family: "Space Grotesk", sans-serif;
+      }
+      .app-title {
+        font-size: 18px;
+        font-weight: 700;
+        line-height: 1.1;
+      }
+      .app-subtitle {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .status-row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        align-items: center;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--panel) 88%, transparent);
+        border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+        box-shadow: 0 8px 34px color-mix(in srgb, var(--text) 8%, transparent);
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .pill strong { color: var(--text); font-weight: 700; }
+      .pill .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--accent);
+        box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+
+      .workspace {
+        max-width: 1480px;
+        margin: 0 auto;
+        padding: 24px;
+        width: 100%;
+        display: grid;
+        gap: 24px;
+        grid-template-columns: minmax(0, 1.08fr) minmax(420px, 0.92fr);
+        align-items: start;
+      }
+
+      .hero, .panel, .surface, .control-box {
+        background: var(--panel);
+        border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+
+      .hero {
+        border-radius: var(--radius-xl);
+        padding: clamp(24px, 3vw, 36px);
+        display: grid;
+        gap: var(--content-gap);
+        overflow: hidden;
+        position: relative;
+      }
+
+      .hero::after {
+        content: "";
+        position: absolute;
+        inset: auto -12% -24% auto;
+        width: 260px;
+        height: 260px;
+        border-radius: 50%;
+        background: radial-gradient(circle, color-mix(in srgb, var(--accent) 22%, transparent), transparent 72%);
+        pointer-events: none;
+        filter: blur(4px);
+        opacity: 0.8;
+      }
+
+      .hero-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        align-items: start;
+      }
+
+      .headline {
+        margin: 0;
+        max-width: 11ch;
+        font-family: "Space Grotesk", "Noto Sans SC", sans-serif;
+        font-size: clamp(42px, 4.6vw, 82px);
+        line-height: 0.98;
+        letter-spacing: -0.05em;
+      }
+
+      .lede {
+        margin: 0;
+        max-width: 54ch;
+        font-size: var(--copy-size);
+        line-height: 1.7;
+        color: var(--muted);
+        text-wrap: pretty;
+      }
+
+      .highlights {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .highlight {
+        border-radius: var(--radius-md);
+        padding: 16px;
+        border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+        background: color-mix(in srgb, var(--panel-strong) 86%, transparent);
+        display: grid;
+        gap: 7px;
+      }
+
+      .highlight span {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        color: var(--soft);
+        font-family: "Space Grotesk", sans-serif;
+      }
+
+      .highlight strong {
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 18px;
+        letter-spacing: -0.02em;
+      }
+
+      .section-title {
+        margin: 0;
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 18px;
+        letter-spacing: -0.02em;
+      }
+
+      .section-kicker {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .surface-grid {
+        display: grid;
+        gap: var(--section-gap);
+      }
+
+      .surface {
+        border-radius: var(--radius-xl);
+        padding: 22px;
+        display: grid;
+        gap: 18px;
+      }
+
+      .surface-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+
+      .surface-meta {
+        display: grid;
+        gap: 6px;
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        font-family: "Space Grotesk", sans-serif;
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        color: var(--text);
+        border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+      }
+
+      .tag .mini-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: var(--accent);
+      }
+
+      .surface-body {
+        display: grid;
+        gap: 16px;
+      }
+
+      .control-row {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: 1.15fr auto auto;
+      }
+
+      .file-chip,
+      .action,
+      .field,
+      .box,
+      .stat {
+        border-radius: var(--radius-md);
+        border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+        background: color-mix(in srgb, var(--panel-strong) 84%, transparent);
+      }
+
+      .file-chip {
+        padding: 15px 16px;
+        min-height: 72px;
+        display: grid;
+        gap: 6px;
+      }
+      .file-chip strong { font-family: "Space Grotesk", sans-serif; font-size: 16px; }
+      .file-chip span { color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+      .action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        min-height: 72px;
+        padding: 0 18px;
+        cursor: pointer;
+        color: var(--text);
+        transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+      }
+      .action:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }
+      .action.primary {
+        background: var(--accent);
+        color: oklch(14% 0.02 252);
+        border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+        box-shadow: 0 18px 34px color-mix(in srgb, var(--accent) 22%, transparent);
+      }
+      .action.primary:hover {
+        background: var(--accent-strong);
+        box-shadow: 0 20px 42px color-mix(in srgb, var(--accent) 28%, transparent);
+      }
+      .action.ghost {
+        background: color-mix(in srgb, var(--panel-strong) 92%, transparent);
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .field {
+        padding: 14px 16px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .field label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        color: var(--soft);
+        font-family: "Space Grotesk", sans-serif;
+      }
+
+      .field strong, .field code {
+        font-size: 15px;
+        line-height: 1.5;
+        word-break: break-word;
+      }
+
+      .field code {
+        font-family: "Space Grotesk", monospace;
+        color: var(--accent-strong);
+      }
+
+      .grid-2 {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .grid-3 {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .stat {
+        padding: 16px;
+        min-height: 94px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .stat span {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        color: var(--soft);
+        font-family: "Space Grotesk", sans-serif;
+      }
+
+      .stat strong {
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 19px;
+        line-height: 1.1;
+      }
+
+      .stat p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+        font-size: 13px;
+      }
+
+      .manifest {
+        display: grid;
+        gap: 12px;
+      }
+
+      .manifest-item {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        padding: 14px 16px;
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--panel-strong) 92%, transparent);
+        border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+      }
+
+      .manifest-item strong {
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 15px;
+        display: block;
+        margin-bottom: 4px;
+      }
+
+      .manifest-item span {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .size {
+        font-family: "Space Grotesk", monospace;
+        color: var(--text);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .progress {
+        display: grid;
+        gap: 12px;
+      }
+
+      .bar-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .bar {
+        height: 12px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--border) 52%, transparent);
+        overflow: hidden;
+      }
+      .bar > div {
+        height: 100%;
+        width: var(--fill, 60%);
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 68%, white));
+        box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 24%, transparent);
+        transition: width 240ms ease;
+      }
+
+      .subtle {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.65;
+      }
+
+      .mute-box {
+        padding: 14px 16px;
+        border-radius: var(--radius-md);
+        border: 1px dashed color-mix(in srgb, var(--border) 72%, transparent);
+        color: var(--muted);
+        background: color-mix(in srgb, var(--panel-strong) 88%, transparent);
+      }
+
+      .state-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .state {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        align-items: center;
+        padding: 14px 16px;
+        border-radius: var(--radius-md);
+        border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+        background: color-mix(in srgb, var(--panel-strong) 90%, transparent);
+      }
+
+      .state strong {
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 15px;
+      }
+
+      .state small {
+        color: var(--muted);
+        display: block;
+        margin-top: 4px;
+        line-height: 1.45;
+      }
+
+      .state .badge {
+        padding: 8px 10px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+        color: var(--text);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .receiver-card {
+        display: grid;
+        gap: 16px;
+      }
+
+      .input-row {
+        display: grid;
+        gap: 12px;
+      }
+
+      .input {
+        width: 100%;
+        border-radius: var(--radius-md);
+        min-height: 68px;
+        padding: 0 16px;
+        border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+        background: color-mix(in srgb, var(--panel-strong) 90%, transparent);
+        color: var(--text);
+        outline: none;
+      }
+      .input::placeholder { color: color-mix(in srgb, var(--soft) 78%, transparent); }
+      .input:focus { border-color: color-mix(in srgb, var(--accent) 52%, var(--border)); box-shadow: 0 0 0 4px var(--accent-soft); }
+
+      .surface-switcher {
+        display: inline-flex;
+        gap: 8px;
+        padding: 6px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--panel-strong) 92%, transparent);
+        border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+      }
+
+      .switch {
+        min-height: 42px;
+        padding: 0 14px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        border-radius: 999px;
+        cursor: pointer;
+        transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+      }
+      .switch.active {
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
+        color: var(--text);
+      }
+
+      .proof-strip {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .proof {
+        padding: 14px;
+        border-radius: var(--radius-md);
+        border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+        background: color-mix(in srgb, var(--panel-strong) 92%, transparent);
+      }
+      .proof strong {
+        display: block;
+        font-family: "Space Grotesk", sans-serif;
+        margin-bottom: 6px;
+      }
+      .proof span {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .tweaks-button {
+        position: fixed;
+        right: 22px;
+        bottom: 22px;
+        z-index: 60;
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+        background: var(--panel-strong);
+        color: var(--text);
+        box-shadow: var(--shadow);
+        cursor: pointer;
+      }
+
+      .tweaks-panel {
+        position: fixed;
+        right: 22px;
+        bottom: 82px;
+        z-index: 60;
+        width: min(360px, calc(100vw - 44px));
+        border-radius: 24px;
+        background: var(--panel-strong);
+        border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+        box-shadow: var(--shadow);
+        padding: 18px;
+        display: none;
+        gap: 14px;
+      }
+      .tweaks-panel.open { display: grid; }
+
+      .tweaks-panel h2 {
+        margin: 0;
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 18px;
+      }
+
+      .tweak {
+        display: grid;
+        gap: 8px;
+      }
+      .tweak label {
+        font-size: 12px;
+        color: var(--soft);
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-family: "Space Grotesk", sans-serif;
+      }
+      .tweak select,
+      .tweak input[type="range"],
+      .tweak input[type="color"] {
+        width: 100%;
+      }
+      .tweak select,
+      .tweak input[type="range"],
+      .tweak input[type="color"] {
+        accent-color: var(--accent);
+      }
+      .tweak select {
+        min-height: 44px;
+        border-radius: 14px;
+        border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+        background: color-mix(in srgb, var(--panel) 86%, transparent);
+        color: var(--text);
+        padding: 0 12px;
+      }
+      .tweak input[type="color"] {
+        height: 44px;
+        padding: 6px;
+        border-radius: 14px;
+        border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+        background: color-mix(in srgb, var(--panel) 86%, transparent);
+      }
+
+      .toggle-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .toggle {
+        position: relative;
+        width: 54px;
+        height: 32px;
+        flex: 0 0 auto;
+      }
+      .toggle input {
+        appearance: none;
+        position: absolute;
+        inset: 0;
+        margin: 0;
+        cursor: pointer;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--border) 64%, transparent);
+        border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+        transition: background 160ms ease;
+      }
+      .toggle input::after {
+        content: "";
+        position: absolute;
+        width: 24px;
+        height: 24px;
+        left: 3px;
+        top: 3px;
+        border-radius: 50%;
+        background: var(--panel-strong);
+        box-shadow: 0 6px 16px color-mix(in srgb, black 20%, transparent);
+        transition: transform 160ms ease;
+      }
+      .toggle input:checked {
+        background: color-mix(in srgb, var(--accent) 44%, transparent);
+      }
+      .toggle input:checked::after { transform: translateX(22px); }
+
+      .footer-note {
+        padding: 0 24px 28px;
+        max-width: 1480px;
+        margin: 0 auto;
+        width: 100%;
+        color: var(--soft);
+        font-size: 13px;
+      }
+
+      .center-claim {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      [data-motion="off"] *,
+      [data-motion="off"] *::before,
+      [data-motion="off"] *::after {
+        transition: none;
+        animation: none;
+        scroll-behavior: auto;
+      }
+
+      .fade-up {
+        animation: fadeUp 420ms ease both;
+      }
+
+      @keyframes fadeUp {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      @media (max-width: 1220px) {
+        .workspace { grid-template-columns: 1fr; }
+        .proof-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .highlights { grid-template-columns: 1fr; }
+      }
+
+      @media (max-width: 780px) {
+        .topbar-inner { grid-template-columns: 1fr; }
+        .status-row { justify-content: flex-start; }
+        .workspace { padding: 16px; }
+        .surface { padding: 18px; }
+        .grid-2, .grid-3, .proof-strip, .center-claim, .control-row, .highlights { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="topbar-inner">
+          <div class="brand-row">
+            <div class="brand-mark">P2P</div>
+            <div class="title-block">
+              <div class="eyebrow">frontend redesign / sender + receiver</div>
+              <div class="app-title">P2P File — Private Transfer Console</div>
+              <div class="app-subtitle">Share Link、Access Code、QR Code 仍是同一个会话入口。</div>
+            </div>
+          </div>
+          <div class="status-row">
+            <div class="pill"><span class="dot"></span><strong>Direct Transfer</strong> preferred</div>
+            <div class="pill">Relay only when needed</div>
+            <div class="pill">No cloud upload</div>
+          </div>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="surface-grid">
+          <article class="hero fade-up">
+            <div class="hero-top">
+              <div class="tag"><span class="mini-dot"></span> Browser-first transfer</div>
+              <div class="surface-switcher" aria-label="View switcher">
+                <button class="switch active" type="button" data-view="split">Split</button>
+                <button class="switch" type="button" data-view="sender">Sender</button>
+                <button class="switch" type="button" data-view="receiver">Receiver</button>
+              </div>
+            </div>
+
+            <div class="surface-body">
+              <h1 class="headline">浏览器直传，不把文件先塞进云端。</h1>
+              <p class="lede">
+                这版把现有的信息架构重写成一台“传输操作台”：左边是操作和会话状态，右边是
+                Frozen Manifest、Share Link、进度和结果态。读法更快，状态更清楚，直连与中继披露更主动。
+              </p>
+              <div class="highlights">
+                <div class="highlight">
+                  <span>Entry model</span>
+                  <strong>Share Link first</strong>
+                  <div class="subtle">Access Code 与 QR Code 只是同一个会话入口的不同表述。</div>
+                </div>
+                <div class="highlight">
+                  <span>Privacy model</span>
+                  <strong>Metadata-only preview</strong>
+                  <div class="subtle">claim 前只看 Frozen Manifest，不碰文件内容。</div>
+                </div>
+                <div class="highlight">
+                  <span>Transport model</span>
+                  <strong>Direct, then relay</strong>
+                  <div class="subtle">一旦回退，界面要明确展示当前 mode 和状态。</div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="surface fade-up" data-surface="sender">
+            <div class="surface-header">
+              <div class="surface-meta">
+                <div class="tag"><span class="mini-dot"></span> Sender surface</div>
+                <h2 class="section-title">发送文件</h2>
+                <p class="section-kicker">文件选择、会话创建、分享面、完成态，全部压成一眼能扫完的操作序列。</p>
+              </div>
+              <div class="pill"><strong>04</strong> visible states</div>
+            </div>
+
+            <div class="surface-body">
+              <div class="control-row">
+                <div class="file-chip">
+                  <strong>选择文件</strong>
+                  <span>支持多文件；文件夹不走这个入口。</span>
+                </div>
+                <button class="action primary" type="button">创建会话</button>
+                <button class="action ghost" type="button">结束会话</button>
+              </div>
+
+              <div class="grid-3">
+                <div class="stat">
+                  <span>Selected files</span>
+                  <strong>3 files</strong>
+                  <p>更像任务清单，不是表单堆栈。</p>
+                </div>
+                <div class="stat">
+                  <span>Total bytes</span>
+                  <strong>48.2 MB</strong>
+                  <p>字节显示固定宽度，避免跳动。</p>
+                </div>
+                <div class="stat">
+                  <span>Status</span>
+                  <strong>Waiting for receiver</strong>
+                  <p>状态语义直接写给用户，不用猜。</p>
+                </div>
+              </div>
+
+              <div class="stack">
+                <div class="field">
+                  <label>Frozen Manifest</label>
+                  <strong>alpha.pdf · 12.4 MB</strong>
+                  <code>beta-design.png · 18.0 MB · gamma.mov · 17.8 MB</code>
+                </div>
+                <div class="center-claim">
+                  <div class="field">
+                    <label>Share Link</label>
+                    <strong>https://p2pfile.local/f/82fa1e</strong>
+                  </div>
+                  <div class="field">
+                    <label>Access Code</label>
+                    <strong>82fa1e</strong>
+                  </div>
+                </div>
+                <div class="grid-2">
+                  <div class="field">
+                    <label>QR Code</label>
+                    <strong>Text block, same link</strong>
+                  </div>
+                  <div class="field">
+                    <label>Transfer mode</label>
+                    <strong>Direct Transfer</strong>
+                  </div>
+                </div>
+                <div class="progress">
+                  <div class="bar-head"><span>Overall progress</span><span>73% · 35.1 MB / 48.2 MB</span></div>
+                  <div class="bar"><div style="--fill:73%"></div></div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="surface fade-up" data-surface="receiver">
+            <div class="surface-header">
+              <div class="surface-meta">
+                <div class="tag"><span class="mini-dot"></span> Receiver surface</div>
+                <h2 class="section-title">接收文件</h2>
+                <p class="section-kicker">先打开会话，再看 manifest，再 claim。每个阶段都要有明确退出路径。</p>
+              </div>
+              <div class="pill"><strong>03</strong> stage flow</div>
+            </div>
+
+            <div class="surface-body receiver-card">
+              <div class="input-row">
+                <input class="input" type="text" value="https://p2pfile.local/f/82fa1e" aria-label="Share Link or Access Code" />
+                <button class="action primary" type="button">打开会话</button>
+              </div>
+
+              <div class="grid-2">
+                <div class="stat">
+                  <span>Session status</span>
+                  <strong>Manifest preview</strong>
+                  <p>占位、完成、离开都用不同视觉，而不是一条通用 error。</p>
+                </div>
+                <div class="stat">
+                  <span>Mode disclosure</span>
+                  <strong>Relayed Transfer</strong>
+                  <p>当中继出现时，用户应该能看见。</p>
+                </div>
+              </div>
+
+              <div class="manifest">
+                <div class="manifest-item">
+                  <div>
+                    <strong>alpha.pdf</strong>
+                    <span>Metadata only preview</span>
+                  </div>
+                  <div class="size">12.4 MB</div>
+                </div>
+                <div class="manifest-item">
+                  <div>
+                    <strong>beta-design.png</strong>
+                    <span>Metadata only preview</span>
+                  </div>
+                  <div class="size">18.0 MB</div>
+                </div>
+                <div class="manifest-item">
+                  <div>
+                    <strong>gamma.mov</strong>
+                    <span>Metadata only preview</span>
+                  </div>
+                  <div class="size">17.8 MB</div>
+                </div>
+              </div>
+
+              <div class="proof-strip">
+                <div class="proof">
+                  <strong>Claim</strong>
+                  <span>把会话接过来，进入 receiving。</span>
+                </div>
+                <div class="proof">
+                  <strong>Occupied</strong>
+                  <span>第二个接收方要明确被拦下。</span>
+                </div>
+                <div class="proof">
+                  <strong>Ended</strong>
+                  <span>发送方离开要有单独通知。</span>
+                </div>
+                <div class="proof">
+                  <strong>Completed</strong>
+                  <span>接收完成后保留只读结果视图。</span>
+                </div>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <aside class="surface-grid">
+          <section class="surface fade-up">
+            <div class="surface-header">
+              <div class="surface-meta">
+                <div class="tag"><span class="mini-dot"></span> State ladder</div>
+                <h2 class="section-title">状态阶梯</h2>
+                <p class="section-kicker">把流程从技术实现翻译成可见状态。用户不需要理解协议，只需要知道现在在哪一步。</p>
+              </div>
+            </div>
+            <div class="state-list">
+              <div class="state">
+                <div>
+                  <strong>Idle / selecting</strong>
+                  <small>开始前的空态，给出明确主按钮。</small>
+                </div>
+                <div class="badge">sender</div>
+              </div>
+              <div class="state">
+                <div>
+                  <strong>Manifest / preview</strong>
+                  <small>先看冻结清单，再决定是否进入 claim。</small>
+                </div>
+                <div class="badge">receiver</div>
+              </div>
+              <div class="state">
+                <div>
+                  <strong>Receiving / progress</strong>
+                  <small>当前文件和整体进度同时可见。</small>
+                </div>
+                <div class="badge">transfer</div>
+              </div>
+              <div class="state">
+                <div>
+                  <strong>Completed / read-only</strong>
+                  <small>完成视图必须和进行中视觉分离。</small>
+                </div>
+                <div class="badge">terminal</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="surface fade-up">
+            <div class="surface-header">
+              <div class="surface-meta">
+                <div class="tag"><span class="mini-dot"></span> Interaction details</div>
+                <h2 class="section-title">这个重写强调什么</h2>
+              </div>
+            </div>
+            <div class="manifest">
+              <div class="manifest-item">
+                <div>
+                  <strong>更少边框噪音</strong>
+                  <span>层次用背景、密度和对齐来表达，不用过多卡片嵌套。</span>
+                </div>
+                <div class="size">01</div>
+              </div>
+              <div class="manifest-item">
+                <div>
+                  <strong>更强结果态</strong>
+                  <span>completed / ended / occupied 各自有明确视觉身份。</span>
+                </div>
+                <div class="size">02</div>
+              </div>
+              <div class="manifest-item">
+                <div>
+                  <strong>更直的术语</strong>
+                  <span>Share Link、Access Code、Frozen Manifest、Transfer Mode 保留现有词汇。</span>
+                </div>
+                <div class="size">03</div>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </main>
+
+      <div class="footer-note">
+        Open file locally and inspect: theme switch, density switch, and how the sender/receiver surfaces reflow on narrow widths.
+      </div>
+    </div>
+
+    <button class="tweaks-button" id="tweaks-btn" type="button" aria-label="Open tweaks">⚙</button>
+
+    <section class="tweaks-panel" id="tweaks-panel" aria-label="Tweaks panel">
+      <h2>Tweaks</h2>
+      <div class="tweak">
+        <label for="theme-select">Theme</label>
+        <select id="theme-select">
+          <option value="paper">Paper</option>
+          <option value="midnight">Midnight</option>
+          <option value="contrast">Contrast</option>
+        </select>
+      </div>
+      <div class="tweak">
+        <label for="view-select">View</label>
+        <select id="view-select">
+          <option value="split">Split</option>
+          <option value="sender">Sender only</option>
+          <option value="receiver">Receiver only</option>
+        </select>
+      </div>
+      <div class="tweak">
+        <label for="density-select">Layout density</label>
+        <select id="density-select">
+          <option value="comfortable">Comfortable</option>
+          <option value="compact">Compact</option>
+          <option value="relaxed">Relaxed</option>
+        </select>
+      </div>
+      <div class="tweak">
+        <label for="accent-color">Accent color</label>
+        <input id="accent-color" type="color" value="#2bb8b0" />
+      </div>
+      <div class="tweak">
+        <div class="toggle-row">
+          <label for="motion-toggle">Motion</label>
+          <div class="toggle">
+            <input id="motion-toggle" type="checkbox" checked />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      const root = document.documentElement;
+      const panel = document.getElementById('tweaks-panel');
+      const tweaksBtn = document.getElementById('tweaks-btn');
+      const themeSelect = document.getElementById('theme-select');
+      const viewSelect = document.getElementById('view-select');
+      const densitySelect = document.getElementById('density-select');
+      const accentColor = document.getElementById('accent-color');
+      const motionToggle = document.getElementById('motion-toggle');
+      const switchButtons = [...document.querySelectorAll('.switch')];
+      const surfaces = [...document.querySelectorAll('[data-surface]')];
+      const storageKey = 'p2pfile-frontend-redesign-tweaks';
+
+      const defaults = {
+        theme: 'paper',
+        view: 'split',
+        density: 'comfortable',
+        accent: '#2bb8b0',
+        motion: true,
+      };
+
+      const saved = (() => {
+        try {
+          return JSON.parse(localStorage.getItem(storageKey) || '{}');
+        } catch {
+          return {};
+        }
+      })();
+
+      const state = { ...defaults, ...saved };
+
+      function applyState() {
+        root.dataset.theme = state.theme;
+        root.dataset.view = state.view;
+        root.dataset.density = state.density;
+        root.dataset.motion = state.motion ? 'on' : 'off';
+        root.style.setProperty('--accent', state.accent);
+        root.style.setProperty('--accent-strong', state.accent);
+        root.style.setProperty('--accent-soft', `color-mix(in srgb, ${state.accent} 16%, transparent)`);
+
+        themeSelect.value = state.theme;
+        viewSelect.value = state.view;
+        densitySelect.value = state.density;
+        accentColor.value = state.accent;
+        motionToggle.checked = state.motion;
+
+        switchButtons.forEach((button) => {
+          button.classList.toggle('active', button.dataset.view === state.view);
+        });
+
+        surfaces.forEach((surface) => {
+          const surfaceName = surface.dataset.surface;
+          surface.classList.toggle('hidden', state.view === 'sender' ? surfaceName !== 'sender' : state.view === 'receiver' ? surfaceName !== 'receiver' : false);
+        });
+
+        localStorage.setItem(storageKey, JSON.stringify(state));
+      }
+
+      themeSelect.addEventListener('change', (event) => {
+        state.theme = event.target.value;
+        applyState();
+      });
+
+      viewSelect.addEventListener('change', (event) => {
+        state.view = event.target.value;
+        applyState();
+      });
+
+      densitySelect.addEventListener('change', (event) => {
+        state.density = event.target.value;
+        applyState();
+      });
+
+      accentColor.addEventListener('input', (event) => {
+        state.accent = event.target.value;
+        applyState();
+      });
+
+      motionToggle.addEventListener('change', (event) => {
+        state.motion = event.target.checked;
+        applyState();
+      });
+
+      switchButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          state.view = button.dataset.view;
+          applyState();
+        });
+      });
+
+      tweaksBtn.addEventListener('click', () => {
+        panel.classList.toggle('open');
+      });
+
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          panel.classList.remove('open');
+        }
+      });
+
+      applyState();
+    </script>
+  </body>
+</html>
