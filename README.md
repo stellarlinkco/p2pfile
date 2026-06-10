@@ -60,16 +60,69 @@ If `just` is not installed, use the equivalent Bun scripts from `package.json`.
 
 ## Configuration
 
-Optional environment variables:
+Build-time and runtime variables:
 
 ```bash
 REDIS_URL=redis://127.0.0.1:6379
+VITE_SIGNAL_ORIGIN=https://signal.example.com
 VITE_TURN_URL=turn:turn.example.com:3478
 VITE_TURN_USERNAME=example-user
 VITE_TURN_CREDENTIAL=example-password
 ```
 
 Without `REDIS_URL`, the signal service uses the in-memory live session store for local development and tests.
+
+## Deployment conditions
+
+Current deployment needs two services:
+
+- **Web**: serves the built Vite SPA and must provide history fallback for `/`, `/receive`, and `/f/:sessionId`.
+- **Signal**: serves HTTP session APIs and the WebSocket signaling endpoint on `/ws/:sessionId/:role/:token`.
+
+Recommended production conditions:
+
+- Public HTTPS for the web origin.
+- Public HTTPS/WSS for the signal origin.
+- WebSocket upgrade support on the signal reverse proxy.
+- **Redis** via `REDIS_URL` when running more than one signal instance. Without Redis, session state stays in-memory and is only safe for a single signal container/process.
+- **TURN** credentials when transfers must work across restrictive NAT/firewall environments. The web build reads `VITE_TURN_URL`, `VITE_TURN_USERNAME`, and `VITE_TURN_CREDENTIAL`.
+- Set `VITE_SIGNAL_ORIGIN` at web build time when the web and signal services are on different origins.
+
+## Docker
+
+This repository ships a multi-target root `Dockerfile`.
+
+Build the web image:
+
+```bash
+docker build \
+  --target web \
+  --build-arg VITE_SIGNAL_ORIGIN=https://signal.example.com \
+  --build-arg VITE_TURN_URL=turn:turn.example.com:3478 \
+  --build-arg VITE_TURN_USERNAME=example-user \
+  --build-arg VITE_TURN_CREDENTIAL=example-password \
+  -t p2pfile-web .
+```
+
+Build the signal image:
+
+```bash
+docker build --target signal -t p2pfile-signal .
+```
+
+Run the signal container:
+
+```bash
+docker run --rm -p 3001:3001 \
+  -e REDIS_URL=redis://redis:6379 \
+  p2pfile-signal
+```
+
+Run the web container:
+
+```bash
+docker run --rm -p 8080:80 p2pfile-web
+```
 
 ## Validation commands
 

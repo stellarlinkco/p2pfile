@@ -7,5 +7,6 @@ test-results/
 .env
 .env.*
 !.env.example
+tmp/
 *.log
 *.bak.*

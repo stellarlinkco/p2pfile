@@ -106,12 +106,12 @@ test.describe("workflow E1 browser proofs", () => {
       await expect(receiver.getByTestId("receiver-manifest")).toContainText("resume-second.bin");
       await expect(receiver.getByTestId("claim-session-button")).toBeVisible();
       await receiver.getByTestId("claim-session-button").click();
-      await expect(receiver.getByText("1 / 2 completed")).toBeVisible({ timeout: 30_000 });
+      await expect(receiver.getByText("1 / 2", { exact: true })).toBeVisible({ timeout: 30_000 });
 
       await receiver.reload();
       await expect(receiver.getByTestId("claim-session-button")).toBeVisible();
       await receiver.getByTestId("claim-session-button").click();
-      await expect(receiver.getByText(/1 \/ 2 completed|2 \/ 2 completed/)).toBeVisible();
+      await expect(receiver.getByText(/^(1 \/ 2|2 \/ 2)$/)).toBeVisible();
 
       await waitForCompletedSession(receiver);
       await waitForCompletedSession(page);

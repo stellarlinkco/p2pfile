@@ -7,6 +7,7 @@ export const app = runtime.app;
 export const store = runtime.store;
 
 export default {
+  hostname: "0.0.0.0",
   port: 3001,
   fetch: app.fetch,
   websocket,

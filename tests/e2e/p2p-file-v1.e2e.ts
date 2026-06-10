@@ -155,9 +155,9 @@ test.describe("P2P File v1 session flow", () => {
     try {
       await openReceiver(receiver, shareLink);
       await receiver.getByTestId("claim-session-button").click();
-      await expect(receiver.getByRole("button", { name: "放弃 claim" })).toBeVisible();
+      await expect(receiver.getByRole("button", { name: "放弃接收" })).toBeVisible();
       await expect(receiver.getByTestId("session-status")).not.toContainText(/failed|失败/i);
-      await receiver.getByRole("button", { name: "放弃 claim" }).click();
+      await receiver.getByRole("button", { name: "放弃接收" }).click();
       await expect(receiver.getByTestId("claim-session-button")).toBeVisible();
     } finally {
       await receiver.close();

@@ -1,0 +1,39 @@
+services:
+  redis:
+    image: redis:7.2.5-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  signal:
+    build:
+      context: .
+      target: signal
+    image: p2pfile-signal:deploy
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
+    ports:
+      - "127.0.0.1:3301:3001"
+
+  web:
+    build:
+      context: .
+      target: web
+    image: p2pfile-web:deploy
+    restart: unless-stopped
+    depends_on:
+      - signal
+    ports:
+      - "127.0.0.1:3302:80"
+
+  edge:
+    image: nginx:alpine
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - web
+      - signal
+    volumes:
+      - ./docker/nginx-edge.conf:/etc/nginx/conf.d/default.conf:ro

@@ -1,0 +1,23 @@
+services:
+  signal:
+    image: p2pfile-signal:deploy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3301:3001"
+
+  web:
+    image: p2pfile-web:deploy
+    restart: unless-stopped
+    depends_on:
+      - signal
+    ports:
+      - "127.0.0.1:3302:80"
+
+  edge:
+    image: nginx:alpine
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - web
+    volumes:
+      - ./docker/nginx-edge.conf:/etc/nginx/conf.d/default.conf:ro
