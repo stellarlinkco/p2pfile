@@ -15,12 +15,14 @@ export function StatCard({ label, value, tone = "default" }: StatCardProps) {
   return (
     <div
       className={[
-        "rounded-xl border p-4 text-center",
+        "min-w-0 rounded-xl border p-4 text-center",
         tone === "accent" ? "border-teal-200 bg-teal-50" : "border-neutral-200 bg-white",
       ].join(" ")}
     >
       <p className="text-neutral-500 text-sm">{label}</p>
-      <p className="mt-1 font-bold text-2xl text-neutral-950 tracking-tight">{value}</p>
+      <p className="mt-1 break-all font-bold text-xl text-neutral-950 tracking-tight sm:text-2xl">
+        {value}
+      </p>
     </div>
   );
 }
@@ -46,13 +48,13 @@ export function ProgressPanel({ progress, speed }: ProgressPanelProps) {
       />
       <div className="mt-5 grid grid-cols-2 rounded-xl border border-neutral-200 bg-neutral-50 text-center">
         <div className="border-neutral-200 border-r p-4">
-          <p className="text-neutral-500 text-sm">传输速度</p>
-          <p className="mt-1 font-bold text-2xl tabular-nums">{formatSpeed(speed)}</p>
+          <p className="text-neutral-500 text-sm">速度</p>
+          <p className="mt-1 font-bold text-xl tabular-nums sm:text-2xl">{formatSpeed(speed)}</p>
         </div>
         <div className="p-4">
           <p className="text-neutral-500 text-sm">已完成</p>
-          <p className="mt-1 font-bold text-2xl tabular-nums">
-            {progress.completedFiles} / {progress.totalFiles} completed
+          <p className="mt-1 font-bold text-xl tabular-nums sm:text-2xl">
+            {progress.completedFiles} / {progress.totalFiles}
           </p>
         </div>
       </div>
@@ -67,7 +69,7 @@ export function OverallProgressPanel({ progress }: { progress: TransferProgress 
         <div>
           <h2 className="font-bold text-xl tracking-tight">总体进度</h2>
           <p className="mt-1 text-neutral-500 text-sm">
-            {progress.completedFiles} / {progress.totalFiles} files completed
+            已完成 {progress.completedFiles} / {progress.totalFiles}
           </p>
         </div>
         <span className="font-mono font-semibold text-teal-700 tabular-nums">
@@ -127,7 +129,7 @@ export function ManifestPanel({
     <section className={panelClass}>
       <div className="mb-4 flex items-center justify-between gap-4">
         <div>
-          <h3 className="font-bold text-2xl tracking-tight">✣ {title}</h3>
+          <h3 className="font-bold text-xl tracking-tight sm:text-2xl">✣ {title}</h3>
           <p className="mt-1 text-neutral-500 text-sm">{caption}</p>
         </div>
         <span className="rounded-full border border-neutral-200 px-3 py-2 font-semibold text-sm">
@@ -161,11 +163,11 @@ export function ManifestPanel({
           >
             <span className="font-semibold">{index + 1}</span>
             <span className="truncate font-semibold text-neutral-950">{file.name}</span>
-            <span>metadata-only</span>
+            <span>仅元数据</span>
             <span className="tabular-nums">{formatBytes(file.size)}</span>
             {showStatus ? (
               <span className="w-fit rounded-full bg-teal-50 px-3 py-1 font-medium text-teal-700">
-                ● ready
+                就绪
               </span>
             ) : null}
           </div>
@@ -183,36 +185,35 @@ type ManifestPanelProps = {
   showStatus?: boolean;
 };
 
-export function ModeDisclosure({ mode, status }: { mode: TransferMode | null; status: string }) {
+export function ModeDisclosure({ mode }: { mode: TransferMode | null }) {
   const formattedMode = formatMode(mode);
+
   return (
     <section className={panelClass} data-testid="mode-disclosure">
       <div className="mb-3 flex items-center justify-between gap-4">
-        <h3 className="font-bold text-lg">Transfer Mode</h3>
+        <h3 className="font-bold text-lg">传输方式</h3>
         <span className="rounded-full bg-teal-50 px-3 py-1 font-medium text-sm text-teal-700">
           {formattedMode}
         </span>
       </div>
       <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4">
-        <p className="font-semibold">Direct Transfer 优先；Relayed Transfer 仅在需要时自动使用。</p>
-        <p className="mt-2 text-neutral-600 text-sm">
-          当前版本不提供手动切换按钮。这里用于披露实际传输模式，避免用户误以为文件会先上传到云端。
-        </p>
+        <p className="font-semibold">优先直连，必要时自动切到中继。</p>
       </div>
-      <p className="mt-3 text-neutral-600 text-sm">
-        {formattedMode} · {status}
-      </p>
     </section>
   );
 }
 
 export function SessionSummary({ session }: { session: SessionPublicView }) {
   return (
-    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <section className="grid min-w-0 grid-cols-2 gap-3 xl:grid-cols-4">
       <StatCard label="Session ID" value={session.sessionId} />
       <StatCard label="Access Code" value={session.accessCode || "--"} tone="accent" />
-      <StatCard label="Expires" value={formatRelativeTime(session.expiresAt)} />
-      <StatCard label="Status" value={session.status} />
+      <div className="hidden xl:block">
+        <StatCard label="Expires" value={formatRelativeTime(session.expiresAt)} />
+      </div>
+      <div className="hidden xl:block">
+        <StatCard label="Status" value={session.status} />
+      </div>
     </section>
   );
 }

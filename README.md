@@ -2,6 +2,16 @@
 
 Browser-first file transfer for sending files directly between two browsers. P2P File creates a short-lived session with a Share Link, Access Code, and QR Code that all point to the same transfer window. File contents stay on the peer path by default and only use relay transport when connectivity requires it.
 
+## Screenshots
+
+### Sender console
+
+![Sender console screenshot](docs/screenshots/sender-console.png)
+
+### Receiver preview
+
+![Receiver preview screenshot](docs/screenshots/receiver-preview.png)
+
 ## What it does
 
 - Sender selects one or more files and creates a Temporary Session Window.

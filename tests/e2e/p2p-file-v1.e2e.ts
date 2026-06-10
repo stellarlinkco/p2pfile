@@ -38,7 +38,7 @@ test.describe("P2P File v1 session flow", () => {
     await page.getByTestId("sender-file-input").setInputFiles(TEST_FILES);
     await page.getByTestId("create-session-button").click();
 
-    await page.getByRole("button", { name: "复制 Share Link" }).click();
+    await page.getByRole("button", { name: "复制链接" }).click();
 
     await expect(page.getByText("已复制")).toBeVisible();
   });

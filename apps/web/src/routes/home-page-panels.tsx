@@ -20,14 +20,17 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
 
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-      <div className="mb-4 flex items-center justify-between gap-4">
-        <h1 className="font-bold text-2xl tracking-tight">发送文件</h1>
+      <div className="mb-4 flex items-start justify-between gap-3 sm:items-center">
+        <div>
+          <h1 className="font-bold text-2xl tracking-tight">发送文件</h1>
+          <p className="mt-1 text-neutral-500 text-sm">选中文件后创建会话。</p>
+        </div>
         <span className="font-semibold text-teal-700 text-sm">{stageLabel}</span>
       </div>
-      <label className="grid min-h-24 cursor-pointer grid-cols-[1fr_auto] items-center gap-4 rounded-xl border border-dashed border-neutral-300 p-5 transition hover:border-teal-600/50">
-        <span className="flex items-center justify-center gap-3 text-neutral-700">
+      <label className="grid min-h-24 cursor-pointer gap-4 rounded-xl border border-dashed border-neutral-300 p-4 transition hover:border-teal-600/50 sm:grid-cols-[1fr_auto] sm:p-5">
+        <span className="flex items-center gap-3 text-neutral-700">
           <span className="text-3xl text-teal-700">▧</span>
-          点击右侧按钮选择一个或多个文件
+          选择一个或多个文件
         </span>
         <span className="rounded-lg bg-teal-600 px-6 py-3 font-bold text-white shadow-sm">
           选择文件
@@ -40,10 +43,9 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
           type="file"
         />
       </label>
-      <div className="mt-4 grid grid-cols-3 overflow-hidden rounded-xl border border-neutral-200 text-center">
-        <StatCell label="已选文件" value={`${sender.selectedFiles.length}`} />
+      <div className="mt-4 grid grid-cols-2 overflow-hidden rounded-xl border border-neutral-200 text-center">
+        <StatCell label="文件数" value={`${sender.selectedFiles.length}`} />
         <StatCell label="总大小" value={formatBytes(sender.totalBytes)} />
-        <StatCell label="发送状态" value={stageLabel} accent />
       </div>
       <button
         className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-teal-600 px-4 font-bold text-white shadow-sm transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-500"
@@ -54,14 +56,14 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
       >
         ▷ {sender.stage === "creating" ? "创建中…" : "创建会话"}
       </button>
-      <div className="mt-3 grid grid-cols-2 gap-3">
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
         {sender.shareState ? (
           <button
             className="rounded-xl border border-neutral-200 px-3 py-3"
             onClick={sender.endCurrentSession}
             type="button"
           >
-            □ 结束会话
+            结束会话
           </button>
         ) : null}
         <Link
@@ -69,7 +71,7 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
           data-testid="home-receive-link"
           to="/receive"
         >
-          ◉ 查看接收页
+          接收页
         </Link>
       </div>
       <p className="mt-3 text-neutral-500 text-sm" data-testid="session-status">
@@ -105,7 +107,6 @@ function StatCell({
 
 export function ShareSurfaces({
   sender,
-  progress,
 }: {
   sender: SenderShareState;
   progress: TransferProgress;
@@ -123,15 +124,18 @@ export function ShareSurfaces({
 
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <h2 className="font-bold text-xl tracking-tight">入口和接收状态并排，不再藏到下方</h2>
-        <div className="grid gap-1 justify-items-end">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="font-bold text-xl tracking-tight">分享入口</h2>
+          <p className="mt-1 text-neutral-500 text-sm">把链接、访问码或二维码发给接收方。</p>
+        </div>
+        <div className="grid gap-1 sm:justify-items-end">
           <button
             className="rounded-lg bg-teal-600 px-5 py-3 font-bold text-white"
             onClick={copyShareLink}
             type="button"
           >
-            复制 Share Link
+            复制链接
           </button>
           {copyStatus === "copied" ? (
             <span className="font-medium text-emerald-700 text-sm" role="status">
@@ -146,13 +150,10 @@ export function ShareSurfaces({
         </div>
       </div>
       <ShareLinkValue label="Share Link" testId="share-link" value={sender.shareUrl} />
-      <div className="mt-3 grid grid-cols-[1fr_176px] gap-4">
+      <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-[1fr_176px]">
         <ShareValue label="Access Code" testId="access-code" value={sender.session.accessCode} />
         <ShareQrCode shareUrl={sender.shareUrl} />
       </div>
-      <p className="mt-3 text-neutral-500 text-sm">
-        Completed Files：{progress.completedFiles}/{progress.totalFiles}
-      </p>
     </section>
   );
 }
@@ -160,10 +161,8 @@ export function ShareSurfaces({
 export function SharePlaceholder() {
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-      <h2 className="font-bold text-xl tracking-tight">接收文件</h2>
-      <p className="mt-2 text-neutral-500 text-sm">
-        接收入口是独立页面。创建会话后，这里会改为显示可复制的 Share Link、Access Code 与 QR Code。
-      </p>
+      <h2 className="font-bold text-xl tracking-tight">等待创建会话</h2>
+      <p className="mt-2 text-neutral-500 text-sm">创建后，这里会显示链接、访问码和二维码。</p>
       <Link
         className="mt-4 flex min-h-12 items-center justify-center rounded-lg bg-teal-600 font-bold text-white"
         data-testid="home-receive-link"

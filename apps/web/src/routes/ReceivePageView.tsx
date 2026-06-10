@@ -23,30 +23,29 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
 
   return (
     <div className="mx-auto grid w-full max-w-[1568px] gap-3 px-3 py-3 sm:px-4 xl:grid-cols-[0.9fr_1.1fr]">
-      <section className="grid min-w-0 content-start gap-3">
+      <section className="grid min-w-0 grid-cols-1 content-start gap-3">
         <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-          <div className="mb-4 flex items-center justify-between gap-4">
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-neutral-500 text-sm">Metadata-Only Preview</p>
+              <p className="text-neutral-500 text-sm">接收入口</p>
               <h1 className="mt-1 font-bold text-2xl tracking-tight">接收文件</h1>
             </div>
-            <span className="rounded-full bg-teal-50 px-3 py-2 font-medium text-teal-700">
-              Temporary Session Window
+            <span className="rounded-full bg-teal-50 px-3 py-2 font-medium text-teal-700 text-sm">
+              临时会话
             </span>
           </div>
           <p className="mb-4 text-neutral-600 text-sm leading-6">
-            Share Link、Access Code 与 QR Code 指向同一个 Temporary Session Window。claim 前只展示
-            Frozen Manifest metadata。
+            粘贴链接或访问码后查看文件清单，再开始接收。
           </p>
           <label className="font-semibold text-sm" htmlFor="receiver-entry">
-            Share Link 或 Access Code
+            链接或访问码
           </label>
           <input
             className="mt-2 w-full rounded-lg border border-neutral-200 px-4 py-3 outline-none focus:border-teal-600"
             data-testid="receiver-entry-input"
             id="receiver-entry"
             onChange={(event) => flow.setEntryValue(event.target.value)}
-            placeholder="https://…/f/session-id 或 Access Code"
+            placeholder="https://…/f/session-id 或访问码"
             value={flow.entryValue}
           />
           <button
@@ -56,38 +55,35 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
             onClick={flow.openEntry}
             type="button"
           >
-            ↪ 打开会话
+            打开
           </button>
           <div className="mt-3 text-neutral-600 text-sm" data-testid="session-status">
             {flow.status}
           </div>
           {flow.error ? <p className="mt-2 text-rose-700 text-sm">{flow.error}</p> : null}
         </section>
-        {hideLivePanels ? null : <ModeDisclosure mode={flow.mode} status={flow.status} />}
+        {hideLivePanels ? null : <ModeDisclosure mode={flow.mode} />}
         {hideLivePanels ? null : <ProgressPanel progress={flow.progress} speed={flow.speed} />}
         <div data-testid="current-file-progress" className="hidden" />
         <div data-testid="overall-progress" className="hidden" />
       </section>
 
-      <section className="grid min-w-0 content-start gap-3">
+      <section className="grid min-w-0 grid-cols-1 content-start gap-3">
         {flow.session && !hideLivePanels ? (
           <>
             <SessionSummary session={flow.session} />
             <div data-testid="receiver-manifest">
               <ManifestPanel
-                caption="点击“接收全部文件”前不会展示缩略图、预览或文件内容。"
+                caption="接收前只显示文件名和大小。"
                 files={flow.session.files}
-                title="Frozen Manifest"
+                title="文件清单"
                 totalBytes={flow.session.totalBytes}
                 showStatus={false}
               />
             </div>
           </>
         ) : hideLivePanels ? null : (
-          <EmptyHint
-            title="等待会话入口"
-            body="打开 /f/:sessionId Share Link，或输入 Access Code 后查看 Frozen Manifest。"
-          />
+          <EmptyHint title="等待会话入口" body="输入链接或访问码后查看文件清单。" />
         )}
 
         {flow.stage === "manifest" || flow.stage === "failed" ? (
@@ -103,7 +99,7 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
             </button>
             {flow.retriesRemaining !== null ? (
               <p className="text-neutral-600 text-sm" data-testid="retry-budget-remaining">
-                Retry Budget 剩余 {flow.retriesRemaining} 次；用尽后需发送方重新创建会话。
+                还可重试 {flow.retriesRemaining} 次，用尽后需重新创建会话。
               </p>
             ) : null}
           </>
@@ -115,7 +111,7 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
             onClick={flow.releaseCurrentClaim}
             type="button"
           >
-            放弃 claim
+            放弃接收
           </button>
         ) : null}
 
