@@ -2,7 +2,7 @@ export function FlowTimeline() {
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
       <h3 className="mb-5 font-bold text-xl">传输流程</h3>
-      <div className="grid grid-cols-4 gap-3 text-center">
+      <div className="grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
         {[
           ["1", "Select", "freeze manifest\n冻结文件并冻结清单"],
           ["2", "Share", "Share Link / Access Code / QR Code\n分享链接或访问码"],

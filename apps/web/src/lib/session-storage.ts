@@ -1,17 +1,45 @@
 const RECEIVER_TOKEN_PREFIX = "p2pfile:receiver:";
+const receiverTokenMemory = new Map<string, string>();
+
+function receiverTokenKey(sessionId: string) {
+  return `${RECEIVER_TOKEN_PREFIX}${sessionId}`;
+}
 
 export function readReceiverToken(sessionId: string) {
   if (typeof window === "undefined") {
     return null;
   }
 
-  return window.localStorage.getItem(`${RECEIVER_TOKEN_PREFIX}${sessionId}`);
+  const memoryToken = receiverTokenMemory.get(sessionId);
+  if (memoryToken) {
+    return memoryToken;
+  }
+
+  try {
+    const storedToken = window.localStorage.getItem(receiverTokenKey(sessionId));
+    if (storedToken) {
+      receiverTokenMemory.set(sessionId, storedToken);
+    }
+    return storedToken;
+  } catch {
+    return null;
+  }
 }
 
 export function writeReceiverToken(sessionId: string, receiverToken: string) {
-  window.localStorage.setItem(`${RECEIVER_TOKEN_PREFIX}${sessionId}`, receiverToken);
+  receiverTokenMemory.set(sessionId, receiverToken);
+  try {
+    window.localStorage.setItem(receiverTokenKey(sessionId), receiverToken);
+  } catch {
+    // Best-effort cache only.
+  }
 }
 
 export function clearReceiverToken(sessionId: string) {
-  window.localStorage.removeItem(`${RECEIVER_TOKEN_PREFIX}${sessionId}`);
+  receiverTokenMemory.delete(sessionId);
+  try {
+    window.localStorage.removeItem(receiverTokenKey(sessionId));
+  } catch {
+    // Best-effort cache only.
+  }
 }

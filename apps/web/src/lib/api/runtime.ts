@@ -18,6 +18,7 @@ const CLAIM_STATES: Record<ClaimSessionState, true> = {
   occupied: true,
   completed: true,
   ended: true,
+  failed: true,
 };
 
 function requestOrigin() {
@@ -205,6 +206,7 @@ export async function claimSession(sessionId: string, receiverToken?: string | n
     ok: true,
     session,
     receiverToken: asOptionalString(payload.receiverToken),
+    retriesRemaining: asOptionalNumber(payload.retriesRemaining),
     originalReceiver: Boolean(payload.originalReceiver),
     claim: claim as ClaimSessionState,
   } satisfies ClaimSessionResponse;

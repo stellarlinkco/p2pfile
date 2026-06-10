@@ -438,6 +438,19 @@
         color: var(--accent-strong);
       }
 
+      .field.qr-field {
+        align-items: start;
+      }
+
+      .field.qr-field img {
+        width: 148px;
+        height: 148px;
+        border-radius: 18px;
+        border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+        background: color-mix(in srgb, var(--panel-strong) 94%, transparent);
+        padding: 8px;
+      }
+
       .grid-2 {
         display: grid;
         gap: 14px;
@@ -856,10 +869,10 @@
           <article class="hero fade-up">
             <div class="hero-top">
               <div class="tag"><span class="mini-dot"></span> Browser-first transfer</div>
-              <div class="surface-switcher" aria-label="View switcher">
-                <button class="switch active" type="button" data-view="split">Split</button>
-                <button class="switch" type="button" data-view="sender">Sender</button>
-                <button class="switch" type="button" data-view="receiver">Receiver</button>
+              <div class="surface-switcher" aria-label="View switcher" role="group">
+                <button class="switch active" type="button" data-view="split" aria-pressed="true">Split</button>
+                <button class="switch" type="button" data-view="sender" aria-pressed="false">Sender</button>
+                <button class="switch" type="button" data-view="receiver" aria-pressed="false">Receiver</button>
               </div>
             </div>
 
@@ -936,17 +949,17 @@
                 <div class="center-claim">
                   <div class="field">
                     <label>Share Link</label>
-                    <strong>https://p2pfile.local/f/82fa1e</strong>
+                    <strong>https://p2pfile.local/f/82fa1e6b3c4d</strong>
                   </div>
                   <div class="field">
                     <label>Access Code</label>
-                    <strong>82fa1e</strong>
+                    <strong>9W8Q2M</strong>
                   </div>
                 </div>
                 <div class="grid-2">
-                  <div class="field">
+                  <div class="field qr-field">
                     <label>QR Code</label>
-                    <strong>Text block, same link</strong>
+                    <img alt="QR Code for Share Link" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAJQAAACUCAYAAAB1PADUAAAAAklEQVR4AewaftIAAATkSURBVO3BUY7c2pIEwfCD2v+WffRJJASQoLJaV/PCDH9J1ZKTqkUnVYtOqhadVC365DeA/BeouQNkUjMBeUPNBGRScwfIW2qugPwXqLk6qVp0UrXopGrRSdWiTx5S801AtgDZAuQNIJOaJ4C8oeabgNw5qVp0UrXopGrRSdWiT/4AkDfUvAHkCTVPALmjZgIyAblSMwH5aUDeUPPGSdWik6pFJ1WLTqoWffKPU7NFzQTkCTVXQN5S8686qVp0UrXopGrRJ//D1NxR8wSQSk6qFp1ULTqpWnRSteiTP6DmXwFkUvMGkEnNFZBJzU9T85NOqhadVC06qVp0UrXok4eA/CuATGomIFdqJiCTmgnIlZoJyKRmAjKpuQPkbzupWnRSteikatFJ1aJPfkPN/wI1bwB5Q80WNf9FJ1WLTqoWnVQtwl8yAJnUTEC+Sc0WIHfUPAHkm9TcAfJNat44qVp0UrXopGrRSdWiTx4C8oaaCcikZgJypWYC8oSaO0CeUHMHyKRmAjIB+SY1bwCZ1FydVC06qVp0UrXopGoR/pIvAjKpmYBMau4AeUvNFZAtaiYgk5oJyBtq/raTqkUnVYtOqhadVC365DeATGomIJOaN9S8oWYCMqmZgNxR89PUvAHkDTUTkEnNnZOqRSdVi06qFp1ULfrkN9RMQLYAeULNFZAn1ExAJjV3gDyh5grIT1PzBJArIJOaN06qFp1ULTqpWoS/5CUgb6h5AsgWNROQKzVvAblS8wSQn6bmDSCTmquTqkUnVYtOqhadVC3CX/JFQCY1E5BJzR0gW9Q8AWSLmgnIpOYKyKRmAvKGmjdOqhadVC06qVp0UrXok4eATGomIFdqnlBzB8ikZgIyqZmA3AEyqXkDyARkUjMBuVLzlpo7QCY1d06qFp1ULTqpWnRStQh/yQDkCTUTkL9NzTcBeUPNNwGZ1ExA7qh546Rq0UnVopOqRZ/8ASCTmr8NyDepeQPITwMyqbkC8gSQSc3VSdWik6pFJ1WLTqoWffKQmieA3FEzAflpaq6APAFkUnMFZFLzBJBJzd+m5s5J1aKTqkUnVYtOqhZ98geATGruAJnUTEDeUDMBeUPNG2omID8NyKTmSs0EZFJz56Rq0UnVopOqRSdViz75A2omIHfUTEAmNW8AmdRMQK7UTECeUHMFZFIzAXkCyLcAeQLIpObqpGrRSdWik6pFJ1WL8Jf8I4BMaiYgk5pvAnKlZgIyqZmATGreAPJNaq5OqhadVC06qVr0yW8A+S9Qc6XmLSCTmjeATGreAPIGkEnNFjVvnFQtOqladFK16KRq0ScPqfkmIHeATGreAnKlZgIyqZmAXKmZ1ExA3lDzlpo7QCY1d06qFp1ULTqpWnRSteiTPwDkDTVbgExqJiBvqJmA3AHyhJoJyATkW4BMat44qVp0UrXopGrRSdWiT/4fAvKEmisgT6j5JjUTkCs1E5BJzQTkDpAn1FydVC06qVp0UrXok3+cmgnIpOYNNROQO2omIFuATGomIFvU3DmpWnRSteikatFJ1aJP/oCan6RmAvIEkDtqJiBb1DwBZFJzBWSLmgnIGydVi06qFp1ULTqpWvTJQ0D+NiA/Tc0EZFJzBWRSMwGZ1ExAvgXIpOaNk6pFJ1WLTqoWnVQtwl9SteikatFJ1aKTqkX/B0SkK1B7B1yiAAAAAElFTkSuQmCC" />
                   </div>
                   <div class="field">
                     <label>Transfer mode</label>
@@ -973,7 +986,7 @@
 
             <div class="surface-body receiver-card">
               <div class="input-row">
-                <input class="input" type="text" value="https://p2pfile.local/f/82fa1e" aria-label="Share Link or Access Code" />
+                <input class="input" type="text" value="https://p2pfile.local/f/82fa1e6b3c4d" aria-label="Share Link or Access Code" />
                 <button class="action primary" type="button">打开会话</button>
               </div>
 
@@ -1112,13 +1125,13 @@
       </main>
 
       <div class="footer-note">
-        Open file locally and inspect: theme switch, density switch, and how the sender/receiver surfaces reflow on narrow widths.
+        Open file locally and inspect how the sender/receiver surfaces reflow on narrow widths and keep the same entry vocabulary.
       </div>
     </div>
 
-    <button class="tweaks-button" id="tweaks-btn" type="button" aria-label="Open tweaks">⚙</button>
+    <button class="tweaks-button" id="tweaks-btn" type="button" aria-label="Open tweaks" aria-controls="tweaks-panel" aria-expanded="false">⚙</button>
 
-    <section class="tweaks-panel" id="tweaks-panel" aria-label="Tweaks panel">
+    <section class="tweaks-panel" id="tweaks-panel" aria-label="Tweaks panel" aria-hidden="true">
       <h2>Tweaks</h2>
       <div class="tweak">
         <label for="theme-select">Theme</label>
@@ -1205,7 +1218,9 @@
         motionToggle.checked = state.motion;
 
         switchButtons.forEach((button) => {
-          button.classList.toggle('active', button.dataset.view === state.view);
+          const selected = button.dataset.view === state.view;
+          button.classList.toggle('active', selected);
+          button.setAttribute('aria-pressed', selected ? 'true' : 'false');
         });
 
         surfaces.forEach((surface) => {
@@ -1213,7 +1228,9 @@
           surface.classList.toggle('hidden', state.view === 'sender' ? surfaceName !== 'sender' : state.view === 'receiver' ? surfaceName !== 'receiver' : false);
         });
 
-        localStorage.setItem(storageKey, JSON.stringify(state));
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(state));
+        } catch {}
       }
 
       themeSelect.addEventListener('change', (event) => {
@@ -1248,13 +1265,19 @@
         });
       });
 
+      function syncTweakPanel(open) {
+        panel.classList.toggle('open', open);
+        panel.setAttribute('aria-hidden', open ? 'false' : 'true');
+        tweaksBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      }
+
       tweaksBtn.addEventListener('click', () => {
-        panel.classList.toggle('open');
+        syncTweakPanel(!panel.classList.contains('open'));
       });
 
       document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
-          panel.classList.remove('open');
+          syncTweakPanel(false);
         }
       });
 

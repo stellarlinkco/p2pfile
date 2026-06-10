@@ -1,6 +1,8 @@
 import type { ClaimSessionResponse, SessionPublicView } from "../lib/api";
 import type { ReceivedFile, TransferProgress } from "../lib/transfer";
 
+export const RETRY_EXHAUSTED_STATUS = "Retry Budget 已用尽：请发送方重新创建会话。";
+
 export type ReceiverStage =
   | "entry"
   | "loading"
@@ -12,6 +14,7 @@ export type ReceiverStage =
   | "completed"
   | "completion-notice"
   | "ended"
+  | "retry-exhausted"
   | "failed";
 
 export function initialProgress(
@@ -37,6 +40,14 @@ export function initialProgress(
   };
 }
 
+function decodeEntrySegment(segment: string) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 export function sessionIdFromEntry(input: string) {
   const trimmed = input.trim();
   if (trimmed.length === 0) {
@@ -47,7 +58,7 @@ export function sessionIdFromEntry(input: string) {
     const url = new URL(trimmed);
     const route = url.pathname.match(/^\/(?:f|s)\/([^/]+)$/);
     if (route?.[1]) {
-      return decodeURIComponent(route[1]);
+      return decodeEntrySegment(route[1]);
     }
   } catch {
     // Plain access code or session id.
@@ -55,7 +66,7 @@ export function sessionIdFromEntry(input: string) {
 
   const route = trimmed.match(/^\/?(?:f|s)\/([^/]+)$/);
   if (route?.[1]) {
-    return decodeURIComponent(route[1]);
+    return decodeEntrySegment(route[1]);
   }
 
   return trimmed;
@@ -68,11 +79,15 @@ export function receiverStageFromClaim(response: ClaimSessionResponse): Receiver
   }
 
   if (claim === "completed") {
-    return response.originalReceiver ? "completed" : "completion-notice";
+    return "completion-notice";
   }
 
   if (claim === "ended") {
     return "ended";
+  }
+
+  if (claim === "failed") {
+    return "retry-exhausted";
   }
 
   return "connecting";
@@ -81,6 +96,10 @@ export function receiverStageFromClaim(response: ClaimSessionResponse): Receiver
 export function receiverStageFromSession(session: SessionPublicView): ReceiverStage {
   if (session.status === "ended") {
     return "ended";
+  }
+
+  if (session.status === "failed") {
+    return "retry-exhausted";
   }
 
   if (session.status === "completed-view") {

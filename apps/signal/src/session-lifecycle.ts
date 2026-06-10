@@ -9,6 +9,17 @@ export function markSessionEnded(session: StoredSession, endedAt: number, reason
   detachSocket(session, "receiver");
 }
 
+export function markSessionFailed(session: StoredSession, failureReason?: string) {
+  session.state = "failed";
+  session.failureReason = failureReason;
+  detachSocket(session, "sender");
+  detachSocket(session, "receiver");
+}
+
+export function isTerminallyClosed(session: StoredSession) {
+  return session.state === "ended" || session.state === "failed";
+}
+
 export function deleteStoredSession(
   sessions: Map<string, StoredSession>,
   accessCodes: Map<string, string>,

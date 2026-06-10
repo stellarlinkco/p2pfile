@@ -13,7 +13,16 @@ export const SharePathSchema = z.string().startsWith("/");
 
 export const TransferModeSchema = z.enum(["direct", "relay"]);
 export const SessionRoleSchema = z.enum(["sender", "receiver"]);
-export const SessionStateSchema = z.enum(["waiting", "claimed", "completed-view", "ended"]);
+export const SessionStateSchema = z.enum([
+  "waiting",
+  "viewing",
+  "claimed",
+  "connecting",
+  "transferring",
+  "completed-view",
+  "ended",
+  "failed",
+]);
 
 export const FileManifestItemSchema = z.object({
   id: z.string().min(1),
@@ -44,6 +53,8 @@ export const SessionPublicViewSchema = z.object({
   completed: z.boolean(),
   ended: z.boolean(),
   expiresAt: z.number().int().nonnegative().nullable(),
+  retriesRemaining: z.number().int().nonnegative(),
+  failureReason: z.string().min(1).optional(),
 });
 
 export const CreateSessionResponseSchema = z.object({
@@ -58,10 +69,13 @@ export const ClaimSessionRequestSchema = z.object({
   receiverToken: SessionTokenSchema.optional(),
 });
 
+export const DEFAULT_RETRY_BUDGET = 3;
+
 export const ClaimSessionResponseSchema = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("claimed"),
     receiverToken: SessionTokenSchema,
+    retriesRemaining: z.number().int().nonnegative(),
     session: SessionPublicViewSchema,
   }),
   z.object({
@@ -75,6 +89,10 @@ export const ClaimSessionResponseSchema = z.discriminatedUnion("status", [
   }),
   z.object({
     status: z.literal("ended"),
+    session: SessionPublicViewSchema,
+  }),
+  z.object({
+    status: z.literal("failed"),
     session: SessionPublicViewSchema,
   }),
 ]);
@@ -140,7 +158,7 @@ export const SignalEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("ice-candidate"),
     payload: z.object({
-      candidate: z.string().min(1),
+      candidate: z.string(),
       sdpMid: z.string().nullable().optional(),
       sdpMLineIndex: z.number().int().nonnegative().nullable().optional(),
       usernameFragment: z.string().nullable().optional(),

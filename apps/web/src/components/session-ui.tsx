@@ -9,7 +9,7 @@ import {
 } from "../lib/format";
 import type { TransferProgress } from "../lib/transfer";
 
-const panelClass = "rounded-xl border border-neutral-200 bg-white p-5 shadow-sm";
+const panelClass = "min-w-0 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm";
 
 export function StatCard({ label, value, tone = "default" }: StatCardProps) {
   return (
@@ -60,6 +60,29 @@ export function ProgressPanel({ progress, speed }: ProgressPanelProps) {
   );
 }
 
+export function OverallProgressPanel({ progress }: { progress: TransferProgress }) {
+  return (
+    <section className={panelClass}>
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="font-bold text-xl tracking-tight">总体进度</h2>
+          <p className="mt-1 text-neutral-500 text-sm">
+            {progress.completedFiles} / {progress.totalFiles} files completed
+          </p>
+        </div>
+        <span className="font-mono font-semibold text-teal-700 tabular-nums">
+          {formatPercent(progress.completedBytes, progress.totalBytes)}
+        </span>
+      </div>
+      <ProgressRow
+        label={`${formatBytes(progress.completedBytes)} / ${formatBytes(progress.totalBytes)}`}
+        completed={progress.completedBytes}
+        total={progress.totalBytes}
+      />
+    </section>
+  );
+}
+
 type ProgressPanelProps = {
   progress: TransferProgress;
   speed: number | null;
@@ -93,7 +116,13 @@ type ProgressRowProps = {
   total: number;
 };
 
-export function ManifestPanel({ files, totalBytes, title, caption }: ManifestPanelProps) {
+export function ManifestPanel({
+  files,
+  totalBytes,
+  title,
+  caption,
+  showStatus = true,
+}: ManifestPanelProps) {
   return (
     <section className={panelClass}>
       <div className="mb-4 flex items-center justify-between gap-4">
@@ -105,26 +134,40 @@ export function ManifestPanel({ files, totalBytes, title, caption }: ManifestPan
           {formatBytes(totalBytes)}
         </span>
       </div>
-      <div className="overflow-hidden rounded-xl border border-neutral-200">
-        <div className="grid grid-cols-[48px_minmax(0,1.5fr)_1fr_96px_110px] bg-neutral-50 px-3 py-3 text-neutral-500 text-sm">
+      <div className="max-w-full overflow-x-auto rounded-xl border border-neutral-200">
+        <div
+          className={[
+            "grid min-w-[620px] bg-neutral-50 px-3 py-3 text-neutral-500 text-sm",
+            showStatus
+              ? "grid-cols-[48px_minmax(0,1.5fr)_1fr_96px_110px]"
+              : "grid-cols-[48px_minmax(0,1.5fr)_1fr_96px]",
+          ].join(" ")}
+        >
           <span>#</span>
           <span>文件名</span>
           <span>备注</span>
           <span>大小</span>
-          <span>状态</span>
+          {showStatus ? <span>状态</span> : null}
         </div>
         {files.map((file, index) => (
           <div
-            className="grid grid-cols-[48px_minmax(0,1.5fr)_1fr_96px_110px] items-center border-neutral-200 border-t px-3 py-4 text-sm"
+            className={[
+              "grid min-w-[620px] items-center border-neutral-200 border-t px-3 py-4 text-sm",
+              showStatus
+                ? "grid-cols-[48px_minmax(0,1.5fr)_1fr_96px_110px]"
+                : "grid-cols-[48px_minmax(0,1.5fr)_1fr_96px]",
+            ].join(" ")}
             key={file.id}
           >
             <span className="font-semibold">{index + 1}</span>
             <span className="truncate font-semibold text-neutral-950">{file.name}</span>
             <span>metadata-only</span>
             <span className="tabular-nums">{formatBytes(file.size)}</span>
-            <span className="w-fit rounded-full bg-teal-50 px-3 py-1 font-medium text-teal-700">
-              ● {index === 0 ? "ready" : index === 1 ? "sending" : "queued"}
-            </span>
+            {showStatus ? (
+              <span className="w-fit rounded-full bg-teal-50 px-3 py-1 font-medium text-teal-700">
+                ● ready
+              </span>
+            ) : null}
           </div>
         ))}
       </div>
@@ -137,6 +180,7 @@ type ManifestPanelProps = {
   totalBytes: number;
   title: string;
   caption: string;
+  showStatus?: boolean;
 };
 
 export function ModeDisclosure({ mode, status }: { mode: TransferMode | null; status: string }) {

@@ -4,6 +4,7 @@ import {
   type CompleteSessionRequest,
   type CreateSessionRequest,
   CreateSessionResponseSchema,
+  DEFAULT_RETRY_BUDGET,
   type EndSessionRequest,
   type ReleaseSessionRequest,
   SessionMutationResponseSchema,
@@ -12,7 +13,9 @@ import {
   SignalEnvelopeSchema,
 } from "@p2pfile/shared";
 import type { ServerWebSocket } from "bun";
-import { deleteStoredSession, markSessionEnded } from "./session-lifecycle";
+import { sweepExpiredSessions } from "./session-expiration";
+import { createStoredSession } from "./session-factory";
+import { isTerminallyClosed, markSessionEnded, markSessionFailed } from "./session-lifecycle";
 import {
   DEFAULT_COMPLETED_VIEW_TTL_MS,
   DEFAULT_HEARTBEAT_TTL_MS,
@@ -22,8 +25,9 @@ import {
   type StoredSession,
 } from "./session-model";
 import { detachSocket, isValidRoleToken, sendToPeer } from "./session-sockets";
+import { isActiveSessionState, markConnecting, markTransferring } from "./session-state";
 import { generateAccessCode, generateSessionId, generateToken } from "./session-tokens";
-import { buildSummary, toPublicSession } from "./session-view";
+import { toPublicSession } from "./session-view";
 
 export type { LiveSessionStoreOptions } from "./session-model";
 
@@ -46,36 +50,23 @@ export class LiveSessionStore {
 
   createSession(input: CreateSessionRequest) {
     this.sweepExpired();
-    const id = generateSessionId();
+    const id = generateSessionId(new Set(this.sessions.keys()));
     const accessCode = generateAccessCode(this.accessCodes);
-    const senderToken = generateToken();
-    const createdAt = this.now();
-    const manifest = input.manifest.map((item) => ({ ...item }));
-    const session: StoredSession = {
+    const session = createStoredSession({
+      request: input,
       id,
       accessCode,
-      sharePath: `${this.sharePathPrefix}/${id}`,
-      senderToken,
-      receiverToken: null,
-      manifest,
-      summary: buildSummary(manifest),
-      state: "waiting",
-      transferMode: "direct",
-      createdAt,
-      openExpiresAt: createdAt + this.openSessionTtlMs,
-      completedViewExpiresAt: null,
-      endedAt: null,
-      completedAt: null,
-      senderLastSeenAt: createdAt,
-      sockets: {},
-    };
+      createdAt: this.now(),
+      openSessionTtlMs: this.openSessionTtlMs,
+      sharePathPrefix: this.sharePathPrefix,
+    });
     this.sessions.set(id, session);
     this.accessCodes.set(accessCode, id);
     return CreateSessionResponseSchema.parse({
       sessionId: id,
       accessCode,
       sharePath: session.sharePath,
-      senderToken,
+      senderToken: session.senderToken,
       session: toPublicSession(session),
     });
   }
@@ -84,6 +75,14 @@ export class LiveSessionStore {
     this.sweepExpired();
     const session = this.sessions.get(sessionId);
     return session ? SessionPublicViewSchema.parse(toPublicSession(session)) : null;
+  }
+
+  viewSession(sessionId: string) {
+    this.sweepExpired();
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    if (session.state === "waiting") session.state = "viewing";
+    return SessionPublicViewSchema.parse(toPublicSession(session));
   }
 
   claimSession(sessionId: string, receiverToken?: string) {
@@ -96,6 +95,12 @@ export class LiveSessionStore {
         session: toPublicSession(session),
       });
     }
+    if (session.state === "failed") {
+      return ClaimSessionResponseSchema.parse({
+        status: "failed",
+        session: toPublicSession(session),
+      });
+    }
     if (session.state === "completed-view") {
       return ClaimSessionResponseSchema.parse({
         status: "completed",
@@ -103,11 +108,20 @@ export class LiveSessionStore {
         session: toPublicSession(session),
       });
     }
-    if (session.state === "claimed") {
+    if (isActiveSessionState(session.state)) {
       if (receiverToken && receiverToken === session.receiverToken) {
+        if (session.retriesRemaining <= 0) {
+          markSessionFailed(session, "retry-budget-exhausted");
+          return ClaimSessionResponseSchema.parse({
+            status: "failed",
+            session: toPublicSession(session),
+          });
+        }
+        session.retriesRemaining -= 1;
         return ClaimSessionResponseSchema.parse({
           status: "claimed",
           receiverToken,
+          retriesRemaining: session.retriesRemaining,
           session: toPublicSession(session),
         });
       }
@@ -118,10 +132,12 @@ export class LiveSessionStore {
     }
     session.state = "claimed";
     session.receiverToken = generateToken();
+    session.failureReason = undefined;
     session.openExpiresAt = null;
     return ClaimSessionResponseSchema.parse({
       status: "claimed",
       receiverToken: session.receiverToken,
+      retriesRemaining: session.retriesRemaining,
       session: toPublicSession(session),
     });
   }
@@ -129,9 +145,16 @@ export class LiveSessionStore {
   releaseSession(sessionId: string, input: ReleaseSessionRequest) {
     this.sweepExpired();
     const session = this.sessions.get(sessionId);
-    if (session?.state !== "claimed" || session.receiverToken !== input.receiverToken) return null;
+    if (
+      !session ||
+      !isActiveSessionState(session.state) ||
+      session.receiverToken !== input.receiverToken
+    )
+      return null;
     session.state = "waiting";
     session.receiverToken = null;
+    session.retriesRemaining = DEFAULT_RETRY_BUDGET;
+    session.failureReason = undefined;
     session.openExpiresAt = this.now() + this.openSessionTtlMs;
     detachSocket(session, "receiver");
     return SessionMutationResponseSchema.parse({ ok: true, session: toPublicSession(session) });
@@ -140,7 +163,12 @@ export class LiveSessionStore {
   completeSession(sessionId: string, input: CompleteSessionRequest) {
     this.sweepExpired();
     const session = this.sessions.get(sessionId);
-    if (session?.state !== "claimed" || session.receiverToken !== input.receiverToken) return null;
+    if (
+      !session ||
+      !isActiveSessionState(session.state) ||
+      session.receiverToken !== input.receiverToken
+    )
+      return null;
     const completedAt = this.now();
     session.state = "completed-view";
     session.completedAt = completedAt;
@@ -180,18 +208,25 @@ export class LiveSessionStore {
   ) {
     this.sweepExpired();
     const session = this.sessions.get(sessionId);
-    if (!session || !isValidRoleToken(session, role, token) || session.state === "ended")
+    if (!session || !isValidRoleToken(session, role, token) || isTerminallyClosed(session))
       return false;
     if (role === "receiver" && session.state === "waiting") return false;
     detachSocket(session, role);
     session.sockets[role] = socket;
     if (role === "sender") session.senderLastSeenAt = this.now();
+    markConnecting(session);
     return true;
   }
 
-  disconnectSocket(sessionId: string, role: SessionRole, token: string) {
+  disconnectSocket(
+    sessionId: string,
+    role: SessionRole,
+    token: string,
+    socket?: ServerWebSocket<unknown>,
+  ) {
     const session = this.sessions.get(sessionId);
     if (!session || !isValidRoleToken(session, role, token)) return;
+    if (socket && session.sockets[role] !== socket) return;
     detachSocket(session, role);
     if (role === "sender" && session.state !== "completed-view") {
       markSessionEnded(session, this.now(), "sender-disconnected");
@@ -200,23 +235,40 @@ export class LiveSessionStore {
 
   handleSignal(sessionId: string, role: SessionRole, token: string, rawMessage: string) {
     const session = this.sessions.get(sessionId);
-    if (!session || !isValidRoleToken(session, role, token) || session.state === "ended")
+    if (!session || !isValidRoleToken(session, role, token) || isTerminallyClosed(session))
       return false;
     const envelope = this.parseSignal(rawMessage);
     if (!envelope) return false;
     if (role === "sender") session.senderLastSeenAt = this.now();
-    if (envelope.type === "sender-heartbeat") return true;
-    if (envelope.type === "mode") session.transferMode = envelope.payload.mode;
+    if (envelope.type === "sender-heartbeat") {
+      markConnecting(session);
+      return true;
+    }
+    if (envelope.type === "offer" && role === "sender") markConnecting(session);
+    if (envelope.type === "mode") {
+      session.transferMode = envelope.payload.mode;
+      if (envelope.payload.mode === "relay") markTransferring(session);
+      if (envelope.payload.mode === "direct" && role === "sender") markConnecting(session);
+    }
+    if (
+      envelope.type === "receiver-ready" ||
+      envelope.type === "relay-ready" ||
+      envelope.type === "relay-message"
+    ) {
+      markTransferring(session);
+    }
     if (envelope.type === "receiver-ready" && role === "receiver") {
       session.sockets.sender?.send(JSON.stringify(envelope));
       return true;
     }
+    if (envelope.type === "sender-left" && role !== "sender") return false;
     if (envelope.type === "sender-left") {
       if (session.state !== "completed-view") {
         markSessionEnded(session, this.now(), envelope.payload.reason ?? "sender-left");
       }
       return true;
     }
+    if (envelope.type === "transfer-complete") return false;
     sendToPeer(session, role, envelope);
     return true;
   }
@@ -231,31 +283,6 @@ export class LiveSessionStore {
   }
 
   private sweepExpired() {
-    const now = this.now();
-    for (const session of this.sessions.values()) {
-      if (
-        session.state === "waiting" &&
-        session.openExpiresAt !== null &&
-        session.openExpiresAt <= now
-      ) {
-        deleteStoredSession(this.sessions, this.accessCodes, session.id);
-        continue;
-      }
-      if (
-        session.state === "completed-view" &&
-        session.completedViewExpiresAt !== null &&
-        session.completedViewExpiresAt <= now
-      ) {
-        deleteStoredSession(this.sessions, this.accessCodes, session.id);
-        continue;
-      }
-      if (
-        session.state === "claimed" &&
-        now - session.senderLastSeenAt > this.heartbeatTtlMs &&
-        !session.sockets.sender
-      ) {
-        markSessionEnded(session, this.now(), "sender-timeout");
-      }
-    }
+    sweepExpiredSessions(this.sessions, this.accessCodes, this.now(), this.heartbeatTtlMs);
   }
 }

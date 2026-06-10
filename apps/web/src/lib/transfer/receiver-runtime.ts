@@ -6,6 +6,7 @@ import {
   awaitIceComplete,
   awaitSocketOpen,
   buildReceiverState,
+  forceDirectFail,
   handleProtocolMessage,
   makePeerConnection,
   parseProtocolMessage,
@@ -62,6 +63,7 @@ export async function startReceiverRuntime(
   let nextRelaySequence = 0;
   let relayRequested = false;
   let relayAnnounceTimer: ReturnType<typeof setInterval> | null = null;
+  let dataChannelOpen = false;
   let stopped = false;
 
   if (receivedFiles.length > 0) {
@@ -98,7 +100,7 @@ export async function startReceiverRuntime(
     relayAnnounceTimer ??= setInterval(announceRelay, 250);
   };
 
-  const handleTransferMessage = (message: TransferProtocolMessage) => {
+  const processTransferMessage = async (message: TransferProtocolMessage) => {
     if (stopped) {
       return;
     }
@@ -129,7 +131,7 @@ export async function startReceiverRuntime(
         }
       }
 
-      handleProtocolMessage(message, state, handlers);
+      await handleProtocolMessage(message, state, handlers);
       if (message.type === "file-end") {
         sendSignal(ws, {
           type: "receiver-ready",
@@ -137,8 +139,17 @@ export async function startReceiverRuntime(
         });
       }
     } catch (error) {
+      stopped = true;
+      stopRelayAnnouncements();
+      pc.close();
+      ws.close();
       handlers.onError(error instanceof Error ? error.message : "接收文件失败。");
     }
+  };
+
+  let processingChain = Promise.resolve();
+  const handleTransferMessage = (message: TransferProtocolMessage) => {
+    processingChain = processingChain.then(() => processTransferMessage(message));
   };
 
   const handleRelayMessage = (sequence: number, message: TransferProtocolMessage) => {
@@ -161,6 +172,7 @@ export async function startReceiverRuntime(
     const channel = event.channel;
     channel.binaryType = "arraybuffer";
     channel.addEventListener("open", () => {
+      dataChannelOpen = true;
       if (!relayRequested) {
         applyMode("direct", handlers);
       }
@@ -178,8 +190,12 @@ export async function startReceiverRuntime(
         return;
       }
 
-      if (dataEvent.data instanceof ArrayBuffer) {
-        handleTransferMessage({ type: "chunk", fileId: "chunk", bytes: dataEvent.data });
+      if (dataEvent.data instanceof ArrayBuffer && state.currentFile) {
+        handleTransferMessage({
+          type: "chunk",
+          fileId: state.currentFile.id,
+          bytes: dataEvent.data,
+        });
       }
     });
   });
@@ -197,7 +213,7 @@ export async function startReceiverRuntime(
     }
 
     if (message.type === "offer") {
-      if (preferRelayInTests()) {
+      if (preferRelayInTests() || forceDirectFail()) {
         requestRelay();
         return;
       }
@@ -219,7 +235,11 @@ export async function startReceiverRuntime(
 
     if (message.type === "mode") {
       if (message.payload.mode === "relay") {
-        requestRelay();
+        if (dataChannelOpen) {
+          applyMode("relay", handlers);
+        } else {
+          requestRelay();
+        }
         return;
       }
 

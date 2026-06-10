@@ -12,6 +12,7 @@ export type ReceiveFlowState = {
   progress: TransferProgress;
   receivedFiles: ReceivedFile[];
   releaseCurrentClaim: () => Promise<void>;
+  retriesRemaining: number | null;
   session: SessionPublicView | null;
   setEntryValue: (value: string) => void;
   speed: number | null;

@@ -5,17 +5,29 @@ import { formatBytes } from "../lib/format";
 import type { TransferProgress } from "../lib/transfer";
 import type { SenderFlowState, SenderShareState } from "./home-flow";
 
+const SENDER_STAGE_LABELS: Record<SenderFlowState["stage"], string> = {
+  completed: "已完成",
+  creating: "创建中",
+  ended: "已结束",
+  failed: "失败",
+  idle: "待创建",
+  transferring: "传输中 ●",
+  waiting: "等待接收方",
+};
+
 export function SenderPanel({ sender }: { sender: SenderFlowState }) {
+  const stageLabel = SENDER_STAGE_LABELS[sender.stage];
+
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
       <div className="mb-4 flex items-center justify-between gap-4">
         <h1 className="font-bold text-2xl tracking-tight">发送文件</h1>
-        <span className="font-semibold text-teal-700 text-sm">传输中 ●</span>
+        <span className="font-semibold text-teal-700 text-sm">{stageLabel}</span>
       </div>
       <label className="grid min-h-24 cursor-pointer grid-cols-[1fr_auto] items-center gap-4 rounded-xl border border-dashed border-neutral-300 p-5 transition hover:border-teal-600/50">
         <span className="flex items-center justify-center gap-3 text-neutral-700">
           <span className="text-3xl text-teal-700">▧</span>
-          拖拽文件到此处，或
+          点击右侧按钮选择一个或多个文件
         </span>
         <span className="rounded-lg bg-teal-600 px-6 py-3 font-bold text-white shadow-sm">
           选择文件
@@ -31,7 +43,7 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
       <div className="mt-4 grid grid-cols-3 overflow-hidden rounded-xl border border-neutral-200 text-center">
         <StatCell label="已选文件" value={`${sender.selectedFiles.length}`} />
         <StatCell label="总大小" value={formatBytes(sender.totalBytes)} />
-        <StatCell label="发送状态" value={sender.stage === "idle" ? "待创建" : "传输中 ●"} accent />
+        <StatCell label="发送状态" value={stageLabel} accent />
       </div>
       <button
         className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-teal-600 px-4 font-bold text-white shadow-sm transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-500"
@@ -98,17 +110,40 @@ export function ShareSurfaces({
   sender: SenderShareState;
   progress: TransferProgress;
 }) {
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+
+  async function copyShareLink() {
+    try {
+      await navigator.clipboard.writeText(sender.shareUrl);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("failed");
+    }
+  }
+
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-      <div className="mb-4 flex items-center justify-between gap-4">
+      <div className="mb-4 flex items-start justify-between gap-4">
         <h2 className="font-bold text-xl tracking-tight">入口和接收状态并排，不再藏到下方</h2>
-        <button
-          className="rounded-lg bg-teal-600 px-5 py-3 font-bold text-white"
-          onClick={() => navigator.clipboard.writeText(sender.shareUrl)}
-          type="button"
-        >
-          复制 Share Link
-        </button>
+        <div className="grid gap-1 justify-items-end">
+          <button
+            className="rounded-lg bg-teal-600 px-5 py-3 font-bold text-white"
+            onClick={copyShareLink}
+            type="button"
+          >
+            复制 Share Link
+          </button>
+          {copyStatus === "copied" ? (
+            <span className="font-medium text-emerald-700 text-sm" role="status">
+              已复制
+            </span>
+          ) : null}
+          {copyStatus === "failed" ? (
+            <span className="font-medium text-rose-700 text-sm" role="status">
+              复制失败，请手动复制
+            </span>
+          ) : null}
+        </div>
       </div>
       <ShareLinkValue label="Share Link" testId="share-link" value={sender.shareUrl} />
       <div className="mt-3 grid grid-cols-[1fr_176px] gap-4">

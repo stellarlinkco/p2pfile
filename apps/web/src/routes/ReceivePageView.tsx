@@ -11,11 +11,19 @@ import type { ReceiveFlowState } from "./receive-flow-types";
 type ReceivePageViewProps = { flow: ReceiveFlowState };
 
 export function ReceivePageView({ flow }: ReceivePageViewProps) {
-  const hideLivePanels = flow.stage === "occupied" || flow.stage === "completion-notice";
+  const hideLivePanels =
+    flow.stage === "occupied" ||
+    flow.stage === "completion-notice" ||
+    flow.stage === "retry-exhausted";
+  const openEntryDisabled =
+    flow.stage === "loading" ||
+    flow.stage === "claiming" ||
+    flow.stage === "connecting" ||
+    flow.stage === "receiving";
 
   return (
-    <div className="mx-auto grid max-w-[1568px] gap-3 px-4 py-3 xl:grid-cols-[0.9fr_1.1fr]">
-      <section className="grid content-start gap-3">
+    <div className="mx-auto grid w-full max-w-[1568px] gap-3 px-3 py-3 sm:px-4 xl:grid-cols-[0.9fr_1.1fr]">
+      <section className="grid min-w-0 content-start gap-3">
         <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
           <div className="mb-4 flex items-center justify-between gap-4">
             <div>
@@ -44,7 +52,7 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
           <button
             className="mt-3 flex min-h-12 w-full items-center justify-center rounded-lg bg-teal-600 font-bold text-white disabled:bg-neutral-200 disabled:text-neutral-500"
             data-testid="receiver-open-session-button"
-            disabled={flow.stage === "loading"}
+            disabled={openEntryDisabled}
             onClick={flow.openEntry}
             type="button"
           >
@@ -61,8 +69,8 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
         <div data-testid="overall-progress" className="hidden" />
       </section>
 
-      <section className="grid content-start gap-3">
-        {flow.session && flow.stage !== "occupied" && flow.stage !== "completion-notice" ? (
+      <section className="grid min-w-0 content-start gap-3">
+        {flow.session && !hideLivePanels ? (
           <>
             <SessionSummary session={flow.session} />
             <div data-testid="receiver-manifest">
@@ -71,10 +79,11 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
                 files={flow.session.files}
                 title="Frozen Manifest"
                 totalBytes={flow.session.totalBytes}
+                showStatus={false}
               />
             </div>
           </>
-        ) : flow.stage === "completion-notice" ? null : flow.stage === "occupied" ? null : (
+        ) : hideLivePanels ? null : (
           <EmptyHint
             title="等待会话入口"
             body="打开 /f/:sessionId Share Link，或输入 Access Code 后查看 Frozen Manifest。"
@@ -82,15 +91,22 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
         )}
 
         {flow.stage === "manifest" || flow.stage === "failed" ? (
-          <button
-            className="min-h-12 w-full rounded-lg bg-teal-600 px-4 font-bold text-white disabled:bg-neutral-200 disabled:text-neutral-500"
-            data-testid="claim-session-button"
-            disabled={!flow.session}
-            onClick={flow.claimCurrentSession}
-            type="button"
-          >
-            接收全部文件
-          </button>
+          <>
+            <button
+              className="min-h-12 w-full rounded-lg bg-teal-600 px-4 font-bold text-white disabled:bg-neutral-200 disabled:text-neutral-500"
+              data-testid="claim-session-button"
+              disabled={!flow.session}
+              onClick={flow.claimCurrentSession}
+              type="button"
+            >
+              接收全部文件
+            </button>
+            {flow.retriesRemaining !== null ? (
+              <p className="text-neutral-600 text-sm" data-testid="retry-budget-remaining">
+                Retry Budget 剩余 {flow.retriesRemaining} 次；用尽后需发送方重新创建会话。
+              </p>
+            ) : null}
+          </>
         ) : null}
 
         {flow.stage === "claiming" || flow.stage === "connecting" || flow.stage === "receiving" ? (
@@ -104,6 +120,7 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
         ) : null}
 
         {flow.stage === "occupied" ? <OccupiedNotice /> : null}
+        {flow.stage === "retry-exhausted" ? <RetryExhaustedNotice /> : null}
         {flow.stage === "ended" ? <EndedNotice /> : null}
         {flow.stage === "completion-notice" ? <CompletionNotice /> : null}
         {flow.stage === "completed" ? <CompletedReceiverView flow={flow} /> : null}
@@ -144,6 +161,17 @@ function OccupiedNotice() {
       testId="occupied-session-notice"
       title="Occupied Session Notice"
       tone="amber"
+    />
+  );
+}
+
+function RetryExhaustedNotice() {
+  return (
+    <NoticeCard
+      body="同一 Claimed Session 内的重试次数已用尽，该会话已进入失败态。请发送方重新创建会话。"
+      testId="retry-exhausted-notice"
+      title="Retry Budget 已用尽"
+      tone="rose"
     />
   );
 }
@@ -190,6 +218,7 @@ function CompletedReceiverView({ flow }: { flow: ReceiveFlowState }) {
               <span className="truncate font-medium text-sm">{file.name}</span>
               <button
                 className="rounded-lg border border-emerald-300 px-3 py-2 text-sm"
+                aria-label={`保存 ${file.name}`}
                 onClick={() => {
                   const anchor = document.createElement("a");
                   anchor.href = file.url;

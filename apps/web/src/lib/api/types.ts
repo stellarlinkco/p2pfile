@@ -27,12 +27,13 @@ export type CreateSessionResponse = {
   session: SessionPublicView;
 };
 
-export type ClaimSessionState = "claimed" | "occupied" | "completed" | "ended";
+export type ClaimSessionState = "claimed" | "occupied" | "completed" | "ended" | "failed";
 
 export type ClaimSessionResponse = {
   ok: true;
   session: SessionPublicView;
   receiverToken: string | null;
+  retriesRemaining: number | null;
   claim: ClaimSessionState;
   originalReceiver: boolean;
 };

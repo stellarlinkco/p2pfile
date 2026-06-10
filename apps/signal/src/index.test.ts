@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createApp } from "./app";
+import { LiveSessionStore } from "./runtime";
 
 const createJsonRequest = (method: string, path: string, body?: unknown) =>
   new Request(`http://localhost${path}`, {
@@ -51,6 +52,48 @@ test("session creation returns frozen manifest summary and sender token", async 
   expect(body.session.canClaim).toBe(true);
 });
 
+test("session creation retries on generated session id collision", async () => {
+  const { app } = createApp();
+  const originalRandomUUID = crypto.randomUUID;
+  const values = [
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "11111111-1111-1111-1111-111111111111",
+    "22222222-2222-2222-2222-222222222222",
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  ];
+  const lastValue = values[values.length - 1] ?? "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  let index = 0;
+
+  Object.defineProperty(crypto, "randomUUID", {
+    configurable: true,
+    value: () => values[index++] ?? lastValue,
+  });
+
+  try {
+    const first = await app.request(
+      createJsonRequest("POST", "/api/sessions", {
+        manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+      }),
+    );
+    const second = await app.request(
+      createJsonRequest("POST", "/api/sessions", {
+        manifest: [{ id: "file-2", name: "photo.jpg", size: 256 }],
+      }),
+    );
+    const firstBody = await first.json();
+    const secondBody = await second.json();
+
+    expect(firstBody.sessionId).toBe("aaaaaaaaaaaa");
+    expect(secondBody.sessionId).toBe("bbbbbbbbbbbb");
+  } finally {
+    Object.defineProperty(crypto, "randomUUID", {
+      configurable: true,
+      value: originalRandomUUID,
+    });
+  }
+});
+
 test("claim is exclusive until released", async () => {
   const { app, body: created } = await createSession();
 
@@ -97,6 +140,71 @@ test("access code resolves back to the same share path", async () => {
     sessionId: body.sessionId,
     sharePath: body.sharePath,
   });
+});
+test("stale sender websocket close does not end replacement connection", () => {
+  const store = new LiveSessionStore();
+  const created = store.createSession({
+    manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+  });
+  const oldSocket = { send() {} };
+  const replacementSocket = { send() {} };
+
+  expect(
+    store.connectSocket(created.sessionId, "sender", created.senderToken, oldSocket as never),
+  ).toBe(true);
+  expect(
+    store.connectSocket(
+      created.sessionId,
+      "sender",
+      created.senderToken,
+      replacementSocket as never,
+    ),
+  ).toBe(true);
+
+  store.disconnectSocket(created.sessionId, "sender", created.senderToken, oldSocket as never);
+
+  expect(store.getPublicSession(created.sessionId)?.state).toBe("waiting");
+});
+
+test("receiver websocket cannot end session with sender-left", async () => {
+  const store = new LiveSessionStore();
+  const created = store.createSession({
+    manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+  });
+  const claim = store.claimSession(created.sessionId);
+  if (claim?.status !== "claimed") {
+    throw new Error("expected claim");
+  }
+
+  const accepted = store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claim.receiverToken,
+    JSON.stringify({ type: "sender-left", payload: {} }),
+  );
+
+  expect(accepted).toBe(false);
+  expect(store.getPublicSession(created.sessionId)?.state).toBe("claimed");
+});
+
+test("receiver websocket cannot forward transfer-complete", () => {
+  const store = new LiveSessionStore();
+  const created = store.createSession({
+    manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+  });
+  const claim = store.claimSession(created.sessionId);
+  if (claim?.status !== "claimed") {
+    throw new Error("expected claim");
+  }
+
+  const accepted = store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claim.receiverToken,
+    JSON.stringify({ type: "transfer-complete", payload: { completedAt: 1 } }),
+  );
+
+  expect(accepted).toBe(false);
 });
 
 test("complete and end endpoints reject invalid tokens", async () => {

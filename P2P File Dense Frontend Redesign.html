@@ -53,7 +53,6 @@
       * { box-sizing: border-box; }
       html, body { margin: 0; min-height: 100%; }
       body {
-        min-width: 1220px;
         background:
           linear-gradient(90deg, color-mix(in srgb, var(--line) 18%, transparent) 1px, transparent 1px) 0 0 / 44px 44px,
           linear-gradient(180deg, color-mix(in srgb, var(--line) 18%, transparent) 1px, transparent 1px) 0 0 / 44px 44px,
@@ -438,25 +437,22 @@
       }
 
       .qr {
-        height: 168px;
+        min-height: 168px;
         border-radius: 18px;
         border: 1px solid var(--line);
-        background:
-          linear-gradient(90deg, var(--ink) 8px, transparent 8px) 10px 10px / 22px 22px,
-          linear-gradient(0deg, var(--ink) 8px, transparent 8px) 10px 10px / 22px 22px,
-          var(--panel-2);
-        opacity: 0.85;
+        background: color-mix(in srgb, var(--panel-2) 86%, transparent);
         display: grid;
         place-items: center;
+        padding: 10px;
       }
 
-      .qr span {
-        padding: 8px 10px;
-        border-radius: 999px;
-        background: var(--panel);
+      .qr img {
+        width: 148px;
+        height: 148px;
+        border-radius: 16px;
         border: 1px solid var(--line);
-        color: var(--muted);
-        font-size: 11px;
+        background: white;
+        padding: 8px;
       }
 
       .receiver-input {
@@ -540,20 +536,16 @@
       }
 
       #tweaks-panel {
-        display: none;
-        position: fixed;
-        right: 20px;
-        bottom: 76px;
-        z-index: 10;
-        width: 270px;
+        display: grid;
+        gap: 12px;
+        width: min(1100px, calc(100vw - 32px));
+        margin: 16px auto 28px;
         border: 1px solid var(--line);
         border-radius: 20px;
         background: var(--panel);
         box-shadow: var(--shadow);
         padding: 14px;
       }
-
-      #tweaks-panel.open { display: grid; gap: 12px; }
       #tweaks-panel h3 { margin: 0; font-size: 16px; }
       .tweak { display: grid; gap: 6px; }
       .tweak label { color: var(--soft); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; }
@@ -570,6 +562,50 @@
       html[data-panel="receiver"] .grid { grid-template-columns: 1fr 1fr; }
       html[data-panel="receiver"] .hero { grid-column: 1; }
       html[data-panel="receiver"] .right { grid-column: 2; }
+
+      @media (max-width: 1180px) {
+        .grid,
+        html[data-panel="sender"] .grid,
+        html[data-panel="receiver"] .grid {
+          grid-template-columns: 1fr;
+          grid-template-rows: auto;
+        }
+        .bar {
+          grid-template-columns: 1fr;
+          align-items: start;
+        }
+
+        .status-cluster,
+        .nav {
+          justify-content: flex-start;
+        }
+
+        .hero,
+        html[data-panel="sender"] .hero,
+        html[data-panel="receiver"] .hero,
+        .sender,
+        html[data-panel="sender"] .sender,
+        .right,
+        html[data-panel="receiver"] .right {
+          grid-column: auto;
+          grid-row: auto;
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 820px) {
+        .app {
+          width: min(100vw, calc(100vw - 20px));
+          margin: 10px auto;
+        }
+
+        .two,
+        .three,
+        .hero-metrics,
+        .terminal-grid {
+          grid-template-columns: 1fr;
+        }
+      }
     </style>
   </head>
   <body>
@@ -624,14 +660,16 @@
 
           <div class="share-link">
             <div class="copy-box">
-              <code class="mono">https://p2pfile.local/f/s_9W8Q2M</code>
-              <button class="secondary" type="button">复制</button>
+              <code class="mono">https://p2pfile.local/f/7db6285ff68e</code>
+              <button class="secondary" type="button">复制 Share Link</button>
             </div>
             <div class="two">
               <div class="stat"><span class="label mono">Access Code</span><strong class="mono">9W8Q2M</strong><p>同一个会话入口</p></div>
-              <div class="stat"><span class="label mono">QR Code</span><strong>快速扫码</strong><p>移动端接收入口</p></div>
+              <div class="stat"><span class="label mono">QR Code</span><strong>与 Share Link 同源</strong><p>移动端接收入口</p></div>
             </div>
-            <div class="qr"><span class="mono">QR placeholder · same Share Link</span></div>
+            <div class="qr">
+              <img alt="QR Code for Share Link" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAJQAAACUCAYAAAB1PADUAAAAAklEQVR4AewaftIAAATkSURBVO3BUW7dWhIEwcqDu/8t5/iTaAggQbf0LExF4B+pWnJSteikatFJ1aKTqkWffAHIv0DNFZBJzRNA7qiZgExq3gAyqXkDyL9AzdVJ1aKTqkUnVYtOqhZ98pCa7wTkjpongGxR8wSQO2omIJOaN9R8JyB3TqoWnVQtOqladFK16JO/AOQNNVuATGreADKpmYBMaq6AvAVkUvMGkDfUvHFSteikatFJ1aKTqkWf/CJAJjVvAblSMwF5AsiVmrfU/FYnVYtOqhadVC365P8EkDtAtgB5Qs0EZFLzG5xULTqpWnRSteikatEnf0HNb6HmDpAn1NwBMqmZgHwnNT/ppGrRSdWik6pFJ1WLPnkIyG8BZFIzAblSMwF5AsiVmgnIpGYC8gaQ/9pJ1aKTqkUnVYtOqhZ98gU1vwWQSc0Tat4AcgfId1LzLzqpWnRSteikatEnXwAyqXkDyKRmArIFyBNqroD8q4B8FzVPAJnUXJ1ULTqpWnRSteikahH+kQeATGomIG+ouQNkUvPTgExqfhKQf4Gaq5OqRSdVi06qFp1ULfrkC0CeAHJHzRNAtgD5aUCu1ExAJjUTkDtqJiBPqHkDyJ2TqkUnVYtOqhadVC365D8AZFJzB8gTaiYgb6h5A8hbau4AmdQ8AeRKzQTkjZOqRSdVi06qFp1ULfrkC2reAnIFZFIzAZnUvAHkpwG5o2YC8oaat9S8oebOSdWik6pFJ1WLPvkCkEnNG2omIJOan6bmCsgE5Ak1d4BMat4A8tOATGquTqoWnVQtOqladFK1CP/IA0CeUHMFZFIzAdmiZgJyR80TQLaomYBMau4AmdRMQO6omYBMaq5OqhadVC06qVp0UrXok7+g5g0gk5oJyJWat9RMQO4AmdTcATKpmYBMaiYgW9TcAfLGSdWik6pFJ1WLTqoWffKQmgnIHTUTkAnIHSBvqZnUXAH5FwC5o2YC8p3U3DmpWnRSteikatFJ1aJPvkC0CeUHMFZFIzAZnUTEDeAPJfA3KpWQPIpOYNIJOaKzVvAblzUrXopGrRSdWik6pFn/yGmieATGreADKpeQLIG2omIJOaJ4BMat4A8gaQSc0bJ1WLTqoWnVQtOqla9MlDQL6h5m8D8oaaj0yqFp1ULTqpWnRSteiTPwD5aWqugExqrgB5Q80E5A01vwXIjZOqRSdVi06qFp1ULfrkITXfCcgdNROQJ9RMQO4AeQPIpGYC8oaat9TcAfLGSdWik6pFJ1WLTqoWffIXgLyh5g0gk5oJyATkDpAn1ExA7gB5C8gWIFdqnlBz56Rq0UnVopOqRSdViz75RdR8JzVPAJnUvAHkCTV3gExq3lAzAZnUXJ1ULTqpWnRSteiTXw7IpOYJIFdAJjVPALlSswnIlZq3gHyXk6pFJ1WLTqoWnVQt+uQvqPnN1HwXIJOaSc0EZFLzXdRMQN44qVp0UrXopGrRSdWiTx4C8l8DMql5Asik5g6QLUAmNW8AmdRMQCY1b6i5c1K16KRq0UnVopOqRfhHqpacVC06qVp0UrXof7pSEXlQKAJOAAAAAElFTkSuQmCC" />
+            </div>
           </div>
 
           <div class="stack">
@@ -642,7 +680,7 @@
               </div>
               <button class="primary" type="button">打开会话</button>
             </div>
-            <input class="receiver-input" value="https://p2pfile.local/f/s_9W8Q2M" aria-label="Share Link or Access Code" />
+            <input class="receiver-input" value="https://p2pfile.local/f/7db6285ff68e" aria-label="Share Link or Access Code" />
             <div class="state-card"><div><strong>Manifest preview</strong><small>claim 前只展示 Frozen Manifest metadata。</small></div><em>ready</em></div>
             <div class="state-card"><div><strong>Occupied Session Notice</strong><small>第二个接收方会被明确拦截。</small></div><em>guard</em></div>
           </div>
@@ -673,9 +711,8 @@
               <div class="stat"><span class="label mono">Status</span><strong>Waiting</strong><p>等待接收方 claim</p></div>
             </div>
             <div class="quick-actions" style="margin-top: 8px">
-              <button class="secondary" type="button">重新选择</button>
+              <span class="secondary">同一会话同时暴露 Share Link / Access Code / QR Code</span>
               <button class="secondary" type="button">结束会话</button>
-              <button class="secondary" type="button">查看接收页</button>
             </div>
           </article>
 
@@ -738,45 +775,12 @@
       Dense redesign：首屏同时显示发送、Frozen Manifest、进度、分享入口、接收状态和终态，减少滚动与重复卡片留白。
     </div>
 
-    <button id="tweaks-btn" type="button" aria-label="Open tweaks">⚙</button>
-    <section id="tweaks-panel" aria-label="Tweaks panel">
-      <h3>Tweaks</h3>
-      <div class="tweak"><label for="theme">Theme</label><select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select></div>
-      <div class="tweak"><label for="density">Density</label><select id="density"><option value="dense">Dense</option><option value="roomy">Roomy</option></select></div>
-      <div class="tweak"><label for="panel">Panel focus</label><select id="panel"><option value="all">All</option><option value="sender">Sender</option><option value="receiver">Receiver</option></select></div>
-      <div class="tweak"><label for="accent">Accent</label><input id="accent" type="color" value="#25b8af" /></div>
+    <section id="tweaks-panel" aria-label="Prototype notes">
+      <h3>Prototype notes</h3>
+      <div class="tweak"><strong>Static artifact only</strong><span>保留密集布局、三栏 cockpit 和结果态层次，不再演示未实现的主题 / 密度 / panel 切换。</span></div>
+      <div class="tweak"><strong>Entry model</strong><span>Share Link、Access Code 与 QR Code 指向同一个 Temporary Session Window。</span></div>
+      <div class="tweak"><strong>Responsive intent</strong><span>1180px 以下折成单列，避免移动端横向滚动。</span></div>
     </section>
 
-    <script>
-      const root = document.documentElement;
-      const storageKey = 'p2p-dense-redesign-tweaks';
-      const defaults = { theme: 'light', density: 'dense', panel: 'all', accent: '#25b8af' };
-      const stored = (() => {
-        try { return JSON.parse(localStorage.getItem(storageKey) || '{}'); } catch { return {}; }
-      })();
-      const tweaks = { ...defaults, ...stored };
-      const controls = {
-        theme: document.getElementById('theme'),
-        density: document.getElementById('density'),
-        panel: document.getElementById('panel'),
-        accent: document.getElementById('accent'),
-      };
-      function applyTweaks() {
-        root.dataset.theme = tweaks.theme;
-        root.dataset.density = tweaks.density;
-        root.dataset.panel = tweaks.panel;
-        root.style.setProperty('--accent', tweaks.accent);
-        root.style.setProperty('--accent-2', tweaks.accent);
-        for (const [key, control] of Object.entries(controls)) control.value = tweaks[key];
-        localStorage.setItem(storageKey, JSON.stringify(tweaks));
-      }
-      for (const [key, control] of Object.entries(controls)) {
-        control.addEventListener('input', (event) => { tweaks[key] = event.target.value; applyTweaks(); });
-      }
-      document.getElementById('tweaks-btn').addEventListener('click', () => {
-        document.getElementById('tweaks-panel').classList.toggle('open');
-      });
-      applyTweaks();
-    </script>
   </body>
 </html>

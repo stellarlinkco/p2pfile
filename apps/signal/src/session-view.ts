@@ -7,12 +7,17 @@ export const buildSummary = (manifest: FileManifestItem[]) => ({
 });
 
 export const toPublicSession = (session: StoredSession): SessionPublicView => {
-  const expiresAt =
-    session.state === "waiting"
-      ? session.openExpiresAt
-      : session.state === "completed-view"
-        ? session.completedViewExpiresAt
-        : null;
+  const preClaim = session.state === "waiting" || session.state === "viewing";
+  const claimed =
+    !preClaim &&
+    session.state !== "completed-view" &&
+    session.state !== "ended" &&
+    session.state !== "failed";
+  const expiresAt = preClaim
+    ? session.openExpiresAt
+    : session.state === "completed-view"
+      ? session.completedViewExpiresAt
+      : null;
 
   return {
     sessionId: session.id,
@@ -20,10 +25,12 @@ export const toPublicSession = (session: StoredSession): SessionPublicView => {
     manifest: session.manifest.map((item) => ({ ...item })),
     summary: { ...session.summary },
     transferMode: session.transferMode,
-    canClaim: session.state === "waiting",
-    claimed: session.state === "claimed",
+    canClaim: preClaim,
+    claimed,
     completed: session.state === "completed-view",
     ended: session.state === "ended",
     expiresAt,
+    retriesRemaining: session.retriesRemaining,
+    failureReason: session.failureReason,
   };
 };

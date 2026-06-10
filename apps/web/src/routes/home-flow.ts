@@ -73,6 +73,7 @@ export function useSenderFlow(): SenderFlowState {
   const [speed, setSpeed] = useState<number | null>(null);
   const runtimeRef = useRef<SenderRuntime | null>(null);
   const sampleRef = useRef<{ bytes: number; at: number } | null>(null);
+  const pendingShareStateRef = useRef<SenderShareState | null>(null);
   const stageRef = useRef<SenderStage>("idle");
 
   const manifest = useMemo(() => manifestFromFiles(selectedFiles), [selectedFiles]);
@@ -91,15 +92,16 @@ export function useSenderFlow(): SenderFlowState {
 
   useEffect(() => {
     const handleUnload = () => {
-      if (!shareState || stageRef.current === "completed") {
+      const activeShareState = shareState ?? pendingShareStateRef.current;
+      if (!activeShareState || stageRef.current === "completed") {
         return;
       }
 
       runtimeRef.current?.markSenderLeft();
-      void endSession(shareState.session.sessionId, shareState.senderToken, true).catch(
+      void endSession(activeShareState.session.sessionId, activeShareState.senderToken, true).catch(
         () => undefined,
       );
-      sendEndSessionBeacon(shareState.session.sessionId, shareState.senderToken);
+      sendEndSessionBeacon(activeShareState.session.sessionId, activeShareState.senderToken);
     };
 
     window.addEventListener("beforeunload", handleUnload);
@@ -126,24 +128,27 @@ export function useSenderFlow(): SenderFlowState {
     sampleRef.current = null;
     setProgress(progressFromFiles(selectedFiles));
 
+    let createdSession: { sessionId: string; senderToken: string } | null = null;
+
     try {
       const response = await createSession(manifest);
+      createdSession = { sessionId: response.sessionId, senderToken: response.senderToken };
       const session = {
         ...response.session,
         sharePath: `/f/${response.sessionId}`,
       } satisfies SessionPublicView;
-      setShareState({
+      const nextShareState = {
         session,
         senderToken: response.senderToken,
         shareUrl: buildShareUrl(`/f/${response.sessionId}`),
-      });
-      setStage("waiting");
-      setStatus("会话已创建。等待接收方 claim 并建立连接。");
+      };
+      pendingShareStateRef.current = nextShareState;
 
-      runtimeRef.current = await startSenderRuntime(
+      const runtime = await startSenderRuntime(
         response.sessionId,
         response.senderToken,
         selectedFiles,
+        manifest,
         {
           onStatus(nextStatus) {
             setStatus(nextStatus);
@@ -180,7 +185,18 @@ export function useSenderFlow(): SenderFlowState {
           },
         },
       );
+      runtimeRef.current = runtime;
+      pendingShareStateRef.current = null;
+      setShareState(nextShareState);
+      setStage("waiting");
+      setStatus("会话已创建。等待接收方 claim 并建立连接。");
     } catch (createError) {
+      if (createdSession) {
+        await endSession(createdSession.sessionId, createdSession.senderToken, true).catch(
+          () => undefined,
+        );
+      }
+      pendingShareStateRef.current = null;
       setError(createError instanceof Error ? createError.message : "创建会话失败。");
       setStage("failed");
       setStatus("创建失败，请重试。");

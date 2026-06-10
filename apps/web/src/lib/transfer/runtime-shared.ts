@@ -1,4 +1,4 @@
-import type { FileManifestItem, TransferMode } from "@p2pfile/shared";
+import type { TransferMode } from "@p2pfile/shared";
 import type {
   BrowserSignalMessage,
   ForwardedSignalMessage,
@@ -9,14 +9,23 @@ import type {
 
 const CHUNK_BYTES = 64 * 1024;
 
+function configuredTurnUrl() {
+  const turnUrl = import.meta.env?.VITE_TURN_URL;
+  return typeof turnUrl === "string" && turnUrl.length > 0 ? turnUrl : null;
+}
+
+export function turnConfigured() {
+  return configuredTurnUrl() !== null;
+}
+
 function configuredIceServers(): RTCIceServer[] {
   const servers: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:global.stun.twilio.com:3478" },
   ];
 
-  const turnUrl = import.meta.env?.VITE_TURN_URL;
-  if (typeof turnUrl === "string" && turnUrl.length > 0) {
+  const turnUrl = configuredTurnUrl();
+  if (turnUrl !== null) {
     servers.push({
       urls: turnUrl,
       username: import.meta.env?.VITE_TURN_USERNAME,
@@ -29,19 +38,12 @@ function configuredIceServers(): RTCIceServer[] {
 
 declare global {
   interface Window {
+    __P2PFILE_FORCE_DIRECT_FAIL__?: boolean;
     __P2PFILE_TEST_FALLBACK__?: boolean;
   }
 }
 
-type ReceiverProtocolState = {
-  manifest: FileManifestItem[];
-  totalBytes: number;
-  completedBytes: number;
-  receivedFiles: number;
-  currentFile: FileManifestItem | null;
-  currentChunks: ArrayBuffer[];
-  currentBytes: number;
-};
+export { buildReceiverState, handleProtocolMessage } from "./receiver-protocol";
 
 export function relayAvailable() {
   return true;
@@ -49,6 +51,10 @@ export function relayAvailable() {
 
 export function preferRelayInTests() {
   return typeof window !== "undefined" && window.__P2PFILE_TEST_FALLBACK__ === true;
+}
+
+export function forceDirectFail() {
+  return typeof window !== "undefined" && window.__P2PFILE_FORCE_DIRECT_FAIL__ === true;
 }
 
 export function awaitSocketOpen(ws: WebSocket) {
@@ -85,9 +91,19 @@ export async function awaitBufferedAmount(channel: RTCDataChannel) {
     return;
   }
 
-  const { promise, resolve } = Promise.withResolvers<void>();
+  const { promise, reject, resolve } = Promise.withResolvers<void>();
+  const onBufferedAmountLow = () => {
+    channel.removeEventListener("close", onClose);
+    resolve();
+  };
+  const onClose = () => {
+    channel.removeEventListener("bufferedamountlow", onBufferedAmountLow);
+    reject(new Error("Data channel closed while waiting for buffer drain."));
+  };
+
   channel.bufferedAmountLowThreshold = CHUNK_BYTES;
-  channel.addEventListener("bufferedamountlow", () => resolve(), { once: true });
+  channel.addEventListener("bufferedamountlow", onBufferedAmountLow, { once: true });
+  channel.addEventListener("close", onClose, { once: true });
   await promise;
 }
 
@@ -132,102 +148,23 @@ export function applyMode(
   handlers.onStatus(mode === "direct" ? "Direct Transfer connected" : "Relayed Transfer connected");
 }
 
-export function buildReceiverState(expectedManifest: FileManifestItem[]): ReceiverProtocolState {
-  return {
-    manifest: expectedManifest,
-    totalBytes: expectedManifest.reduce((sum, file) => sum + file.size, 0),
-    completedBytes: 0,
-    receivedFiles: 0,
-    currentFile: null,
-    currentChunks: [],
-    currentBytes: 0,
-  };
-}
-
-export function handleProtocolMessage(
-  message: TransferProtocolMessage,
-  state: ReceiverProtocolState,
-  handlers: ReceiverRuntimeHandlers,
-) {
-  if (message.type === "manifest") {
-    state.manifest = message.files;
-    state.totalBytes = message.totalBytes;
-    handlers.onStatus("Receiving manifest");
-    return;
-  }
-
-  if (message.type === "file-start") {
-    state.currentFile = message.file;
-    state.currentChunks = [];
-    state.currentBytes = 0;
-    handlers.onStatus(`Receiving ${message.file.name}`);
-    return;
-  }
-
-  if (message.type === "chunk") {
-    state.currentChunks.push(message.bytes);
-    state.currentBytes += message.bytes.byteLength;
-    handlers.onProgress({
-      fileId: state.currentFile ? state.currentFile.id : message.fileId,
-      fileName: state.currentFile ? state.currentFile.name : null,
-      fileBytes: state.currentBytes,
-      fileTotalBytes: state.currentFile ? state.currentFile.size : 0,
-      completedBytes: state.completedBytes + state.currentBytes,
-      totalBytes: state.totalBytes,
-      completedFiles: state.receivedFiles,
-      totalFiles: state.manifest.length,
-    });
-    return;
-  }
-
-  if (message.type === "file-end") {
-    if (
-      !state.currentFile ||
-      state.currentBytes !== message.bytes ||
-      state.currentBytes !== state.currentFile.size
-    ) {
-      throw new Error("File size verification failed.");
-    }
-
-    const blob = new Blob(state.currentChunks);
-    state.completedBytes += state.currentBytes;
-    state.receivedFiles += 1;
-    handlers.onProgress({
-      fileId: state.currentFile.id,
-      fileName: state.currentFile.name,
-      fileBytes: state.currentFile.size,
-      fileTotalBytes: state.currentFile.size,
-      completedBytes: state.completedBytes,
-      totalBytes: state.totalBytes,
-      completedFiles: state.receivedFiles,
-      totalFiles: state.manifest.length,
-    });
-    handlers.onFileReceived({
-      id: state.currentFile.id,
-      name: state.currentFile.name,
-      size: state.currentFile.size,
-      blob,
-      url: URL.createObjectURL(blob),
-    });
-    state.currentFile = null;
-    state.currentChunks = [];
-    state.currentBytes = 0;
-    return;
-  }
-
-  if (state.completedBytes !== message.totalBytes || state.completedBytes !== state.totalBytes) {
-    throw new Error("Session size verification failed.");
-  }
-
-  handlers.onComplete();
-}
+export type PeerConnectionOptions = {
+  iceTransportPolicy?: RTCIceTransportPolicy;
+  connectedMode?: TransferMode;
+};
 
 export function makePeerConnection(
   ws: WebSocket,
   handlers: SenderRuntimeHandlers | ReceiverRuntimeHandlers,
   initialStatus: string,
+  options?: PeerConnectionOptions,
 ) {
-  const pc = new RTCPeerConnection({ iceServers: configuredIceServers() });
+  const connectedMode = options?.connectedMode ?? "direct";
+  const config: RTCConfiguration = { iceServers: configuredIceServers() };
+  if (options?.iceTransportPolicy) {
+    config.iceTransportPolicy = options.iceTransportPolicy;
+  }
+  const pc = new RTCPeerConnection(config);
   handlers.onStatus(initialStatus);
 
   pc.addEventListener("icecandidate", (event) => {
@@ -238,14 +175,11 @@ export function makePeerConnection(
 
   pc.addEventListener("iceconnectionstatechange", () => {
     if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-      applyMode("direct", handlers);
-      sendSignal(ws, { type: "mode", payload: { mode: "direct" } });
+      applyMode(connectedMode, handlers);
+      if (connectedMode === "direct") {
+        sendSignal(ws, { type: "mode", payload: { mode: "direct" } });
+      }
       return;
-    }
-
-    if (pc.iceConnectionState === "failed" && relayAvailable()) {
-      applyMode("relay", handlers);
-      sendSignal(ws, { type: "mode", payload: { mode: "relay" } });
     }
   });
 

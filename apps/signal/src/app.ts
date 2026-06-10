@@ -13,11 +13,18 @@ import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
+import { RedisSessionStore } from "./redis-store";
 import { LiveSessionStore, type LiveSessionStoreOptions } from "./runtime";
 
 const badRequest = (message: string) => new HTTPException(400, { message });
 const unauthorized = () => new HTTPException(401, { message: "invalid token" });
 const notFound = () => new HTTPException(404, { message: "session not found" });
+
+export type SessionStore = LiveSessionStore | RedisSessionStore;
+export type CreateAppOptions = LiveSessionStoreOptions & {
+  redisUrl?: string | null;
+  store?: SessionStore;
+};
 
 const parseJsonBody = async <T>(
   request: Request,
@@ -38,8 +45,12 @@ const parseJsonBody = async <T>(
   return parsed.data;
 };
 
-export const createApp = (options: LiveSessionStoreOptions = {}) => {
-  const store = new LiveSessionStore(options);
+export const createApp = (options: CreateAppOptions = {}) => {
+  const store =
+    options.store ??
+    (options.redisUrl
+      ? new RedisSessionStore(options.redisUrl, options)
+      : new LiveSessionStore(options));
   const app = new Hono();
 
   app.use(
@@ -63,11 +74,11 @@ export const createApp = (options: LiveSessionStoreOptions = {}) => {
 
   app.post("/api/sessions", async (c) => {
     const input = await parseJsonBody(c.req.raw, CreateSessionRequestSchema);
-    return c.json(store.createSession(input), 201);
+    return c.json(await store.createSession(input), 201);
   });
 
-  app.get("/api/sessions/:id", (c) => {
-    const session = store.getPublicSession(c.req.param("id"));
+  app.get("/api/sessions/:id", async (c) => {
+    const session = await store.viewSession(c.req.param("id"));
     if (!session) {
       throw notFound();
     }
@@ -77,7 +88,7 @@ export const createApp = (options: LiveSessionStoreOptions = {}) => {
 
   app.post("/api/sessions/:id/claim", async (c) => {
     const input = await parseJsonBody(c.req.raw, ClaimSessionRequestSchema);
-    const result = store.claimSession(c.req.param("id"), input.receiverToken);
+    const result = await store.claimSession(c.req.param("id"), input.receiverToken);
     if (!result) {
       throw notFound();
     }
@@ -87,7 +98,7 @@ export const createApp = (options: LiveSessionStoreOptions = {}) => {
 
   app.post("/api/sessions/:id/release", async (c) => {
     const input = await parseJsonBody(c.req.raw, ReleaseSessionRequestSchema);
-    const result = store.releaseSession(c.req.param("id"), input);
+    const result = await store.releaseSession(c.req.param("id"), input);
     if (!result) {
       throw unauthorized();
     }
@@ -97,7 +108,7 @@ export const createApp = (options: LiveSessionStoreOptions = {}) => {
 
   app.post("/api/sessions/:id/complete", async (c) => {
     const input = await parseJsonBody(c.req.raw, CompleteSessionRequestSchema);
-    const result = store.completeSession(c.req.param("id"), input);
+    const result = await store.completeSession(c.req.param("id"), input);
     if (!result) {
       throw unauthorized();
     }
@@ -107,7 +118,7 @@ export const createApp = (options: LiveSessionStoreOptions = {}) => {
 
   app.post("/api/sessions/:id/end", async (c) => {
     const input = await parseJsonBody(c.req.raw, EndSessionRequestSchema);
-    const result = store.endSession(c.req.param("id"), input);
+    const result = await store.endSession(c.req.param("id"), input);
     if (!result) {
       throw unauthorized();
     }
@@ -115,8 +126,8 @@ export const createApp = (options: LiveSessionStoreOptions = {}) => {
     return c.json(result);
   });
 
-  app.get("/api/access-codes/:code", (c) => {
-    const resolved = store.resolveAccessCode(c.req.param("code"));
+  app.get("/api/access-codes/:code", async (c) => {
+    const resolved = await store.resolveAccessCode(c.req.param("code"));
     if (!resolved) {
       throw notFound();
     }
@@ -139,18 +150,18 @@ export const createApp = (options: LiveSessionStoreOptions = {}) => {
 
       const role = roleResult.data;
       return {
-        onOpen(_event, ws) {
-          if (!store.connectSocket(sessionId, role, token, ws.raw)) {
+        async onOpen(_event, ws) {
+          if (!(await store.connectSocket(sessionId, role, token, ws.raw))) {
             ws.close(1008, "invalid session websocket");
           }
         },
-        onMessage(event, ws) {
-          if (!store.handleSignal(sessionId, role, token, event.data.toString())) {
+        async onMessage(event, ws) {
+          if (!(await store.handleSignal(sessionId, role, token, event.data.toString()))) {
             ws.close(1003, "invalid signal payload");
           }
         },
-        onClose() {
-          store.disconnectSocket(sessionId, role, token);
+        async onClose(_event, ws) {
+          await store.disconnectSocket(sessionId, role, token, ws.raw);
         },
       };
     }),

@@ -5,14 +5,14 @@ export type TransferProtocolMessage =
   | { type: "manifest"; files: FileManifestItem[]; totalBytes: number }
   | { type: "file-start"; file: FileManifestItem }
   | { type: "chunk"; fileId: string; bytes: ArrayBuffer }
-  | { type: "file-end"; fileId: string; bytes: number }
+  | { type: "file-end"; fileId: string; bytes: number; digest: string }
   | { type: "complete"; totalBytes: number };
 
 export type RelayProtocolMessage =
   | { type: "manifest"; files: FileManifestItem[]; totalBytes: number }
   | { type: "file-start"; file: FileManifestItem }
   | { type: "chunk"; fileId: string; bytesBase64: string }
-  | { type: "file-end"; fileId: string; bytes: number }
+  | { type: "file-end"; fileId: string; bytes: number; digest: string }
   | { type: "complete"; totalBytes: number };
 
 export type TransferProgress = {

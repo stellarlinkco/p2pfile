@@ -1,6 +1,13 @@
 const ACCESS_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-export const generateSessionId = () => crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+export const generateSessionId = (existingSessionIds: ReadonlySet<string>) => {
+  while (true) {
+    const id = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    if (!existingSessionIds.has(id)) {
+      return id;
+    }
+  }
+};
 
 export const generateToken = () =>
   crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");

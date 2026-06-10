@@ -1,3 +1,4 @@
+import type { FileManifestItem } from "@p2pfile/shared";
 import { getSignalUrl } from "../api";
 import { RelayMessageQueue } from "./relay-queue";
 import {
@@ -5,46 +6,62 @@ import {
   awaitIceComplete,
   awaitSocketOpen,
   makePeerConnection,
-  parseSignalMessage,
   preferRelayInTests,
   sendSignal,
 } from "./runtime-shared";
+import { SenderFallbackController } from "./sender-fallback";
 import {
   buildTransferPlan,
   reportResumeProgress,
   sendFiles,
   sendFilesViaRelay,
 } from "./sender-runtime-helpers";
+import { attachSenderSignalHandler } from "./sender-signal-handler";
 import type { SenderRuntime, SenderRuntimeHandlers } from "./types";
+
+export function shouldReuseDirectAttempt(
+  pc: RTCPeerConnection | null,
+  channel: RTCDataChannel | null,
+) {
+  if (!pc || !channel) {
+    return false;
+  }
+
+  return pc.signalingState !== "closed" && channel.readyState === "connecting";
+}
 
 export async function startSenderRuntime(
   sessionId: string,
   senderToken: string,
   files: File[],
+  manifest: FileManifestItem[],
   handlers: SenderRuntimeHandlers,
 ): Promise<SenderRuntime> {
   const ws = new WebSocket(getSignalUrl(sessionId, "sender", senderToken));
   const relayOnly = preferRelayInTests();
-  const plan = buildTransferPlan(files);
+  const plan = buildTransferPlan(files, manifest);
   const queue = new RelayMessageQueue((message) => sendSignal(ws, message));
-  let relayModeTimer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
   let completed = false;
   let transferring = false;
   let confirmedCompletedFiles = 0;
-  let preferredMode: "direct" | "relay" = relayOnly ? "relay" : "direct";
+  const fallback = new SenderFallbackController(relayOnly, handlers);
   let pc: RTCPeerConnection | null = null;
   let channel: RTCDataChannel | null = null;
   let transferToken = 0;
+  let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const stopRelayMode = () => {
-    if (relayModeTimer) {
-      clearInterval(relayModeTimer);
-      relayModeTimer = null;
+  const clearFallbackTimer = () => {
+    if (!fallbackTimer) {
+      return;
     }
+
+    clearTimeout(fallbackTimer);
+    fallbackTimer = null;
   };
 
   const closeDirectTransport = () => {
+    clearFallbackTimer();
     const nextChannel = channel;
     const nextPc = pc;
     channel = null;
@@ -58,7 +75,7 @@ export async function startSenderRuntime(
     completed = true;
     transferring = false;
     queue.reset();
-    stopRelayMode();
+    fallback.stopRelayMode();
     closeDirectTransport();
     handlers.onComplete();
   };
@@ -88,11 +105,14 @@ export async function startSenderRuntime(
 
   const beginDirectTransfer = async (nextChannel: RTCDataChannel) => {
     if (stopped || completed || transferring || channel !== nextChannel) return;
-    preferredMode = "direct";
+    const transportMode = fallback.mode === "turn" ? "relay" : "direct";
     transferring = true;
     const token = transferToken + 1;
     transferToken = token;
-    applyMode("direct", handlers);
+    applyMode(transportMode, handlers);
+    if (transportMode === "relay") {
+      sendSignal(ws, { type: "mode", payload: { mode: "relay" } });
+    }
     try {
       await sendFiles(
         nextChannel,
@@ -108,11 +128,19 @@ export async function startSenderRuntime(
     }
   };
 
+  const continueFallback = () => {
+    if (stopped || completed) return;
+    fallback.continue({
+      startTurnAttempt: () => createDirectAttempt("turn"),
+      startRelayTransfer: () => void beginRelayTransfer(),
+    });
+  };
+
   const beginRelayTransfer = async () => {
     if (stopped || completed || transferring) return;
-    preferredMode = "relay";
+    fallback.mode = "ws-relay";
     closeDirectTransport();
-    stopRelayMode();
+    fallback.stopRelayMode();
     queue.reset();
     transferring = true;
     const token = transferToken + 1;
@@ -122,6 +150,8 @@ export async function startSenderRuntime(
         currentTransferActive(token),
       );
     } catch (error) {
+      fallback.markRelayFailed();
+      continueFallback();
       handleTransferFailure(error);
     }
   };
@@ -141,27 +171,46 @@ export async function startSenderRuntime(
     }
   };
 
-  const createDirectAttempt = () => {
+  const createDirectAttempt = (mode: "direct" | "turn" = "direct") => {
     if (stopped || completed || relayOnly) return;
-    stopRelayMode();
+    clearFallbackTimer();
+    fallback.stopRelayMode();
     closeDirectTransport();
-    const nextPc = makePeerConnection(ws, handlers, "Waiting for receiver");
+    fallback.noteDirectAttempt(mode);
+    const nextPc = makePeerConnection(
+      ws,
+      handlers,
+      "Waiting for receiver",
+      mode === "turn"
+        ? {
+            iceTransportPolicy: "relay",
+            connectedMode: "relay",
+          }
+        : undefined,
+    );
     const nextChannel = nextPc.createDataChannel("files", { ordered: true });
     nextChannel.binaryType = "arraybuffer";
     nextChannel.addEventListener("open", () => {
       if (channel === nextChannel) {
+        clearFallbackTimer();
         void beginDirectTransfer(nextChannel);
       }
     });
     nextPc.addEventListener("iceconnectionstatechange", () => {
       if (pc !== nextPc) return;
       if (nextPc.iceConnectionState === "failed") {
-        preferredMode = "relay";
-        void beginRelayTransfer();
+        fallback.markDirectFailed();
+        continueFallback();
       }
     });
     pc = nextPc;
     channel = nextChannel;
+    fallbackTimer = setTimeout(() => {
+      if (pc === nextPc && channel === nextChannel) {
+        fallback.markDirectFailed();
+        continueFallback();
+      }
+    }, 15_000);
     void sendOffer(nextPc);
   };
 
@@ -177,72 +226,34 @@ export async function startSenderRuntime(
   const handleReceiverReady = (nextCompletedFiles: number) => {
     updateConfirmedCompletedFiles(nextCompletedFiles);
     if (completed || stopped || transferring) return;
-    if (preferredMode === "relay") {
+    if (fallback.mode === "ws-relay") {
       void beginRelayTransfer();
       return;
     }
-    if (pc && pc.signalingState !== "closed" && channel?.readyState !== "open") {
+    if (shouldReuseDirectAttempt(pc, channel)) {
       resendPendingOffer();
       return;
     }
     createDirectAttempt();
   };
 
-  ws.addEventListener("message", async (event) => {
-    const message = parseSignalMessage(event);
-    if (!message || stopped) return;
-    if (message.type === "receiver-ready") {
-      handleReceiverReady(message.payload.completedFiles);
-      return;
-    }
-    if (message.type === "answer") {
-      if (pc && pc.remoteDescription === null) {
-        try {
-          await pc.setRemoteDescription(message.payload);
-        } catch {
-          // Ignore stale answers from a superseded offer.
-        }
-      }
-      return;
-    }
-    if (message.type === "ice-candidate") {
-      if (pc) {
-        try {
-          await pc.addIceCandidate(message.payload);
-        } catch {
-          // Ignore stale ICE candidates from a superseded offer.
-        }
-      }
-      return;
-    }
-    if (message.type === "mode") {
-      preferredMode = message.payload.mode;
-      applyMode(message.payload.mode, handlers);
-      if (message.payload.mode === "relay") {
-        await beginRelayTransfer();
-      }
-      return;
-    }
-    if (message.type === "relay-ready") {
-      preferredMode = "relay";
-      await beginRelayTransfer();
-      return;
-    }
-    if (message.type === "relay-ack") {
-      queue.acknowledge(message.payload.sequence);
-      stopRelayMode();
-      return;
-    }
-    if (message.type === "transfer-complete") {
-      markCompleted();
-    }
+  attachSenderSignalHandler({
+    ws,
+    queue,
+    handlers,
+    isStopped: () => stopped,
+    getPeerConnection: () => pc,
+    handleReceiverReady,
+    markDirectFailed: () => fallback.markDirectFailed(),
+    continueFallback,
+    stopRelayMode: () => fallback.stopRelayMode(),
+    markCompleted,
   });
 
   await awaitSocketOpen(ws);
   if (relayOnly) {
     const sendRelayMode = () => sendSignal(ws, { type: "mode", payload: { mode: "relay" } });
-    sendRelayMode();
-    relayModeTimer = setInterval(sendRelayMode, 250);
+    fallback.startRelayMode(sendRelayMode);
   } else {
     createDirectAttempt();
   }
@@ -251,7 +262,7 @@ export async function startSenderRuntime(
     stop() {
       stopped = true;
       transferring = false;
-      stopRelayMode();
+      fallback.stopRelayMode();
       queue.stop();
       closeDirectTransport();
       ws.close();

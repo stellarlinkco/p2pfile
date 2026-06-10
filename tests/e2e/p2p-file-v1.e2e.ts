@@ -1,103 +1,87 @@
-import { expect, type Page, test } from "@playwright/test";
-
-type TestFile = {
-  name: string;
-  mimeType: string;
-  buffer: Buffer;
-};
-
-const TEST_FILES: TestFile[] = [
-  {
-    name: "notes-alpha.txt",
-    mimeType: "text/plain",
-    buffer: Buffer.from("alpha file from playwright\n", "utf8"),
-  },
-  {
-    name: "notes-beta.json",
-    mimeType: "application/json",
-    buffer: Buffer.from(JSON.stringify({ beta: true, count: 2 }), "utf8"),
-  },
-];
-
-async function enableTransferFallback(page: Page) {
-  await page.addInitScript(() => {
-    Object.defineProperty(window, "__P2PFILE_TEST_FALLBACK__", {
-      configurable: true,
-      value: true,
-    });
-  });
-}
-
-async function createSession(page: Page, files: TestFile[] = TEST_FILES) {
-  await enableTransferFallback(page);
-  await page.goto("/");
-  await page.getByTestId("sender-file-input").setInputFiles(files);
-  await page.getByTestId("create-session-button").click();
-
-  const manifest = page.getByTestId("frozen-manifest");
-  await expect(manifest).toBeVisible();
-  for (const file of files) {
-    await expect(manifest).toContainText(file.name);
-  }
-  await expect(page.getByTestId("share-link")).toBeVisible();
-  await expect(page.getByTestId("access-code")).toBeVisible();
-  await expect(page.getByTestId("qr-code")).toBeVisible();
-  const qrImage = page.getByTestId("qr-code").getByRole("img", {
-    name: "QR Code for Share Link",
-  });
-  await expect(qrImage).toHaveAttribute("src", /^data:image\/png;base64,/);
-
-  return shareLinkFrom(page);
-}
-
-async function shareLinkFrom(page: Page) {
-  const shareLink = page.getByTestId("share-link");
-  const rawLink =
-    (await shareLink.getAttribute("href")) ??
-    (await shareLink.inputValue().catch(() => null)) ??
-    (await shareLink.textContent());
-
-  expect(rawLink, "Share Link must expose a copyable URL").toBeTruthy();
-  return new URL(rawLink?.trim() ?? "", page.url()).toString();
-}
-
-async function openReceiver(page: Page, shareLink: string, files: TestFile[] = TEST_FILES) {
-  await enableTransferFallback(page);
-  await page.goto(shareLink);
-
-  const manifest = page.getByTestId("receiver-manifest");
-  await expect(manifest).toBeVisible();
-  for (const file of files) {
-    await expect(manifest).toContainText(file.name);
-    await expect(manifest).toContainText(String(file.buffer.byteLength));
-  }
-  await expect(page.getByText(/alpha file from playwright|"beta"/i)).toHaveCount(0);
-  await expect(page.getByTestId("claim-session-button")).toBeVisible();
-}
-
-async function newReceiverPage(page: Page) {
-  const receiverPage = await page.context().newPage();
-  await enableTransferFallback(receiverPage);
-  return receiverPage;
-}
-
-async function countVisible(pages: Page[], testId: string) {
-  const states = await Promise.all(
-    pages.map((page) =>
-      page
-        .getByTestId(testId)
-        .isVisible()
-        .catch(() => false),
-    ),
-  );
-  return states.filter(Boolean).length;
-}
+import { expect, test } from "@playwright/test";
+import {
+  accessCodeFrom,
+  blockReceiverStorageAndFallbackSignals,
+  countVisible,
+  createSession,
+  enableTransferFallback,
+  newReceiverPage,
+  openReceiver,
+  qrShareLinkFrom,
+  TEST_FILES,
+} from "./p2p-file-v1.support";
 
 test.describe("P2P File v1 session flow", () => {
+  test("sender upload surface only advertises available file-picker behavior", async ({ page }) => {
+    await page.goto("/");
+
+    await expect(page.getByText("选择文件", { exact: true })).toBeVisible();
+    await expect(page.getByText(/拖拽文件/)).toHaveCount(0);
+  });
+
+  test("sender status distinguishes waiting from active transfer", async ({ page }) => {
+    await enableTransferFallback(page);
+    await page.goto("/");
+    await page.getByTestId("sender-file-input").setInputFiles(TEST_FILES);
+    await page.getByTestId("create-session-button").click();
+
+    await expect(page.getByText("等待接收方", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("传输中 ●")).toHaveCount(0);
+  });
+
+  test("sender receives visible feedback after copying Share Link", async ({ page }) => {
+    await enableTransferFallback(page);
+    await page.goto("/");
+    await page
+      .context()
+      .grantPermissions(["clipboard-write"], { origin: new URL(page.url()).origin });
+    await page.getByTestId("sender-file-input").setInputFiles(TEST_FILES);
+    await page.getByTestId("create-session-button").click();
+
+    await page.getByRole("button", { name: "复制 Share Link" }).click();
+
+    await expect(page.getByText("已复制")).toBeVisible();
+  });
+  test("sender hides share surfaces when runtime startup fails", async ({ page }) => {
+    await page.addInitScript(() => {
+      class BrokenWebSocket {
+        constructor() {
+          throw new Error("blocked websocket");
+        }
+      }
+
+      Object.defineProperty(window, "WebSocket", {
+        configurable: true,
+        value: BrokenWebSocket,
+      });
+    });
+    await page.goto("/");
+    await page.getByTestId("sender-file-input").setInputFiles(TEST_FILES);
+    await page.getByTestId("create-session-button").click();
+
+    await expect(page.getByTestId("session-status")).toContainText(/失败|failed/i);
+    await expect(page.getByTestId("share-link")).toHaveCount(0);
+    await expect(page.getByTestId("qr-code")).toHaveCount(0);
+  });
+
   test("sender creates a multi-file session with frozen manifest and all share surfaces", async ({
     page,
   }) => {
     await createSession(page);
+  });
+
+  test("sender Frozen Manifest stays frozen after session creation", async ({ page }) => {
+    await createSession(page);
+
+    await page.getByTestId("sender-file-input").setInputFiles({
+      name: "replacement.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("replacement", "utf8"),
+    });
+
+    const manifest = page.getByTestId("frozen-manifest");
+    await expect(manifest).toContainText("notes-alpha.txt");
+    await expect(manifest).not.toContainText("replacement.txt");
   });
 
   test("receiver opens Share Link and sees metadata-only manifest before claim", async ({
@@ -138,6 +122,58 @@ test.describe("P2P File v1 session flow", () => {
     }
   });
 
+  test("receiver cannot open another entry while claim is active", async ({ page }) => {
+    const shareLink = await createSession(page);
+    const receiver = await newReceiverPage(page);
+
+    await receiver.addInitScript(() => {
+      const originalPostMessage = BroadcastChannel.prototype.postMessage;
+      BroadcastChannel.prototype.postMessage = function postMessage(message: unknown) {
+        if (typeof this.name === "string" && this.name.startsWith("p2pfile:test:")) {
+          return undefined;
+        }
+
+        return originalPostMessage.call(this, message);
+      };
+    });
+
+    try {
+      await openReceiver(receiver, shareLink);
+      await receiver.getByTestId("claim-session-button").click();
+      await expect(receiver.getByTestId("receiver-open-session-button")).toBeDisabled();
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("receiver claim continues when token storage is unavailable", async ({ page }) => {
+    const shareLink = await createSession(page);
+    const receiver = await newReceiverPage(page);
+
+    await blockReceiverStorageAndFallbackSignals(receiver);
+
+    try {
+      await openReceiver(receiver, shareLink);
+      await receiver.getByTestId("claim-session-button").click();
+      await expect(receiver.getByRole("button", { name: "放弃 claim" })).toBeVisible();
+      await expect(receiver.getByTestId("session-status")).not.toContainText(/failed|失败/i);
+      await receiver.getByRole("button", { name: "放弃 claim" }).click();
+      await expect(receiver.getByTestId("claim-session-button")).toBeVisible();
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("share-link entry remains horizontally accessible on mobile viewport", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await createSession(page);
+
+    await expect(page.getByTestId("share-link")).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
+    ).toBe(false);
+  });
+
   test("multi-file transfer completes for sender and receiver with mode disclosure", async ({
     page,
   }) => {
@@ -165,7 +201,65 @@ test.describe("P2P File v1 session flow", () => {
         timeout: 30_000,
       });
       await expect(receiver.getByRole("link", { name: "接收其他会话" })).toBeVisible();
-      await expect(receiver.getByRole("button", { name: "保存" }).first()).toBeVisible();
+      await expect(receiver.getByRole("button", { name: "保存 notes-alpha.txt" })).toBeVisible();
+      await expect(receiver.getByRole("button", { name: "保存 notes-beta.json" })).toBeVisible();
+    } finally {
+      await receiver.close();
+    }
+  });
+  test("receiver can open the same session through Access Code entry", async ({ page }) => {
+    const shareLink = await createSession(page);
+    const sessionId = new URL(shareLink).pathname.split("/").pop();
+    if (!sessionId) {
+      throw new Error("share link missing session id");
+    }
+
+    const accessCode = await accessCodeFrom(page);
+    const receiver = await newReceiverPage(page);
+
+    try {
+      await receiver.goto("/receive");
+      await receiver.getByTestId("receiver-entry-input").fill(accessCode);
+      await receiver.getByTestId("receiver-open-session-button").click();
+      await expect(receiver).toHaveURL(new RegExp(`/f/${sessionId}$`));
+      await expect(receiver.getByTestId("receiver-manifest")).toBeVisible();
+      await expect(receiver.getByTestId("claim-session-button")).toBeVisible();
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("QR Code encodes a share link that opens the same session", async ({ page }) => {
+    const shareLink = await createSession(page);
+    const qrShareLink = await qrShareLinkFrom(page);
+    const receiver = await newReceiverPage(page);
+
+    expect(qrShareLink).toBe(shareLink);
+
+    try {
+      await openReceiver(receiver, qrShareLink);
+      await expect(receiver.getByTestId("claim-session-button")).toBeVisible();
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("direct transfer completes without the test fallback runtime", async ({ page }) => {
+    const shareLink = await createSession(page, TEST_FILES, { fallback: false });
+    const receiver = await newReceiverPage(page, { fallback: false });
+
+    try {
+      await openReceiver(receiver, shareLink, TEST_FILES, { fallback: false });
+      await receiver.getByTestId("claim-session-button").click();
+
+      await expect(receiver.getByTestId("mode-disclosure")).toContainText(/Direct Transfer|直传/i);
+      await expect(page.getByTestId("mode-disclosure")).toContainText(/Direct Transfer|直传/i);
+      await expect(
+        receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(
+        page.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 30_000 });
     } finally {
       await receiver.close();
     }
@@ -189,9 +283,3 @@ test.describe("P2P File v1 session flow", () => {
     }
   });
 });
-
-declare global {
-  interface Window {
-    __P2PFILE_TEST_FALLBACK__?: boolean;
-  }
-}

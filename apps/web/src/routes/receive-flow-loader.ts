@@ -5,6 +5,7 @@ import { readReceiverToken } from "../lib/session-storage";
 import type { TransferProgress } from "../lib/transfer";
 import {
   initialProgress,
+  RETRY_EXHAUSTED_STATUS,
   type ReceiverStage,
   receiverStageFromClaim,
   receiverStageFromSession,
@@ -18,7 +19,16 @@ export type ReceiveSessionLoaderContext = {
   setStage: (stage: ReceiverStage) => void;
   setStatus: (status: string) => void;
   setError: (error: string | null) => void;
+  setRetriesRemaining: (retriesRemaining: number | null) => void;
 };
+
+const MANIFEST_LOADED_STATUS = "Frozen Manifest 已载入。点击“接收全部文件”后才会开始传输。";
+
+function applySessionStage(context: ReceiveSessionLoaderContext, session: SessionPublicView) {
+  const stage = receiverStageFromSession(session);
+  context.setStage(stage);
+  context.setStatus(stage === "retry-exhausted" ? RETRY_EXHAUSTED_STATUS : MANIFEST_LOADED_STATUS);
+}
 
 export async function loadReceiverSession(
   sessionId: string,
@@ -27,6 +37,7 @@ export async function loadReceiverSession(
 ) {
   context.setStage("loading");
   context.setError(null);
+  context.setRetriesRemaining(null);
   context.setStatus("正在读取会话 metadata-only manifest…");
 
   try {
@@ -56,15 +67,16 @@ export async function loadReceiverSession(
         context.setSession(claimed.session);
         context.setProgress(initialProgress(claimed.session));
         context.setMode(claimed.session.transferMode);
-        context.setStage(receiverStageFromSession(claimed.session));
-        context.setStatus("Frozen Manifest 已载入。点击“接收全部文件”后才会开始传输。");
+        if (claimed.claim === "claimed") {
+          context.setRetriesRemaining(claimed.retriesRemaining);
+        }
+        applySessionStage(context, claimed.session);
       }
     } else {
       context.setSession(nextSession);
       context.setProgress(initialProgress(nextSession));
       context.setMode(nextSession.transferMode);
-      context.setStage(receiverStageFromSession(nextSession));
-      context.setStatus("Frozen Manifest 已载入。点击“接收全部文件”后才会开始传输。");
+      applySessionStage(context, nextSession);
     }
 
     if (canonicalizeRoute) {

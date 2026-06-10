@@ -4,7 +4,6 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   claimSession,
   completeSession,
-  getSession,
   releaseSession,
   resolveAccessCode,
   type SessionPublicView,
@@ -18,13 +17,20 @@ import {
   stopReceiverRuntime,
 } from "./receive-flow-cleanup";
 import { loadReceiverSession } from "./receive-flow-loader";
+import { useSenderEndedPolling } from "./receive-flow-polling";
 import type { ReceiveFlowState } from "./receive-flow-types";
 import {
   initialProgress,
+  RETRY_EXHAUSTED_STATUS,
   type ReceiverStage,
   receiverStageFromClaim,
   sessionIdFromEntry,
 } from "./receive-flow-utils";
+import {
+  cacheReceivedFile,
+  clearCachedReceivedFiles,
+  readCachedReceivedFiles,
+} from "./received-file-cache";
 
 export function useReceiveFlow(): ReceiveFlowState {
   const { sessionId: routeSessionId } = useParams();
@@ -42,6 +48,7 @@ export function useReceiveFlow(): ReceiveFlowState {
   const [progress, setProgress] = useState<TransferProgress>(initialProgress(null));
   const [speed, setSpeed] = useState<number | null>(null);
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
+  const [retriesRemaining, setRetriesRemaining] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const runtimeRef = useRef<ReceiverRuntime | null>(null);
   const sampleRef = useRef<{ bytes: number; at: number } | null>(null);
@@ -63,6 +70,7 @@ export function useReceiveFlow(): ReceiveFlowState {
         setStage,
         setStatus,
         setError,
+        setRetriesRemaining,
       });
     },
     [navigate],
@@ -96,35 +104,16 @@ export function useReceiveFlow(): ReceiveFlowState {
     previousSessionIdRef.current = nextSessionId;
   }, [session]);
 
-  useEffect(() => {
-    if (!session || (stage !== "manifest" && stage !== "connecting" && stage !== "receiving")) {
-      return;
-    }
-
-    const sessionId = session.sessionId;
-    const refresh = async () => {
-      try {
-        const latest = await getSession(sessionId);
-        if (latest.status !== "ended") {
-          return;
-        }
-
-        setSession(latest);
-        setProgress(initialProgress(latest));
-        setMode(latest.transferMode);
-        stopReceiverRuntime(runtimeRef);
-        setStage("ended");
-        setStatus("Sender-Ended Session：发送方已离开，请请求重新创建会话。");
-      } catch {
-        // Ignore transient polling failures.
-      }
-    };
-
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [session, stage]);
+  useSenderEndedPolling({
+    session,
+    stage,
+    runtimeRef,
+    setSession,
+    setProgress,
+    setMode,
+    setStage,
+    setStatus,
+  });
 
   async function openEntry() {
     const entry = sessionIdFromEntry(entryValue);
@@ -137,21 +126,16 @@ export function useReceiveFlow(): ReceiveFlowState {
     setStage("loading");
 
     try {
-      if (entry.includes("-") || entry.length >= 6) {
+      if (/^[a-f0-9]{12}$/i.test(entry)) {
         await loadSession(entry, true);
         return;
       }
 
       const resolved = await resolveAccessCode(entry);
       await loadSession(resolved.sessionId, true);
-    } catch {
-      try {
-        const resolved = await resolveAccessCode(entry);
-        await loadSession(resolved.sessionId, true);
-      } catch (resolveError) {
-        setError(resolveError instanceof Error ? resolveError.message : "Access Code 无效。");
-        setStage("failed");
-      }
+    } catch (resolveError) {
+      setError(resolveError instanceof Error ? resolveError.message : "Access Code 无效。");
+      setStage("failed");
     }
   }
   async function claimCurrentSession() {
@@ -159,7 +143,11 @@ export function useReceiveFlow(): ReceiveFlowState {
       return;
     }
     const currentReceiverToken = readReceiverToken(session.sessionId);
-    const resumeFiles = currentReceiverToken ? receivedFilesRef.current : [];
+    const memoryFiles = receivedFilesRef.current;
+    const cachedFiles = currentReceiverToken
+      ? await readCachedReceivedFiles(session.sessionId, session.files)
+      : [];
+    const resumeFiles = memoryFiles.length >= cachedFiles.length ? memoryFiles : cachedFiles;
     stopReceiverRuntime(runtimeRef);
     setStage("claiming");
     setError(null);
@@ -178,10 +166,17 @@ export function useReceiveFlow(): ReceiveFlowState {
           : [];
       if (!retryingSameReceiver && response.claim === "claimed" && resumeFiles.length > 0) {
         clearReceivedFiles(receivedFilesRef, setReceivedFiles);
+        void clearCachedReceivedFiles(session.sessionId);
       }
       setSession(response.session);
       setProgress(initialProgress(response.session, resumedFiles.length));
       setStage(receiverStageFromClaim(response));
+      setRetriesRemaining(response.claim === "claimed" ? response.retriesRemaining : null);
+
+      if (response.claim === "failed") {
+        setStatus(RETRY_EXHAUSTED_STATUS);
+        return;
+      }
 
       if (response.claim === "occupied") {
         setStatus("Occupied Session Notice：已有另一个接收方 claim 了该会话。");
@@ -234,7 +229,10 @@ export function useReceiveFlow(): ReceiveFlowState {
             sampleRef.current = { bytes: nextProgress.completedBytes, at: now };
           },
           onFileReceived(file) {
-            setReceivedFiles((current) => [...current, file]);
+            setReceivedFiles((current) => {
+              void cacheReceivedFile(session.sessionId, file, current.length);
+              return [...current, file];
+            });
           },
           onComplete() {
             setStage("completed");
@@ -273,6 +271,8 @@ export function useReceiveFlow(): ReceiveFlowState {
       await releaseSession(session.sessionId, token);
       clearReceiverToken(session.sessionId);
       clearReceivedFiles(receivedFilesRef, setReceivedFiles);
+      void clearCachedReceivedFiles(session.sessionId);
+      setRetriesRemaining(null);
       await loadSession(session.sessionId, false);
       setStatus("已放弃 claim，会话回到 pre-claim 状态。");
     } catch (releaseError) {
@@ -289,6 +289,7 @@ export function useReceiveFlow(): ReceiveFlowState {
     progress,
     receivedFiles,
     releaseCurrentClaim,
+    retriesRemaining,
     session,
     setEntryValue,
     speed,

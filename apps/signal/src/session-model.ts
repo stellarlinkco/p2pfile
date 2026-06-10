@@ -16,6 +16,8 @@ export type StoredSession = {
   };
   state: SessionState;
   transferMode: TransferMode;
+  retriesRemaining: number;
+  failureReason?: string;
   createdAt: number;
   openExpiresAt: number | null;
   completedViewExpiresAt: number | null;

@@ -35,13 +35,14 @@ export function startSenderRuntime(
   sessionId: string,
   senderToken: string,
   files: File[],
+  manifest: FileManifestItem[],
   handlers: SenderRuntimeHandlers,
 ): Promise<SenderRuntime> {
   if (preferRelayInTests()) {
-    return startSenderTestFallbackRuntime(sessionId, senderToken, files, handlers);
+    return startSenderTestFallbackRuntime(sessionId, senderToken, files, manifest, handlers);
   }
 
-  return startDirectSenderRuntime(sessionId, senderToken, files, handlers);
+  return startDirectSenderRuntime(sessionId, senderToken, files, manifest, handlers);
 }
 
 export function startReceiverRuntime(
