@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { claimSession } from "./runtime";
+import { claimSession, completeSession, releaseSession } from "./runtime";
 
 const originalFetch = globalThis.fetch;
 
@@ -55,4 +55,47 @@ test("claimSession maps a retry-budget-exhausted response to the failed claim st
   expect(result.session.status).toBe("failed");
   expect(result.session.failureReason).toBe("retry-budget-exhausted");
   expect(result.retriesRemaining).toBeNull();
+});
+
+test("releaseSession returns invalid-token 2xx responses instead of treating them as released", async () => {
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        status: "invalid-token",
+        session: sessionPayload("claimed"),
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    )) as unknown as typeof fetch;
+
+  const result = await releaseSession("abcdefabcdef", "receiver-token-receiver-token");
+
+  expect(result.release).toBe("invalid-token");
+  expect(result.session.status).toBe("claimed");
+});
+
+test("completeSession sends Receiver Token and full-manifest integrity proof", async () => {
+  let requestBody = "";
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requestBody = String(init?.body ?? "");
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+
+  await completeSession(
+    "abcdefabcdef",
+    "receiver-token-receiver-token",
+    [{ id: "file-1", bytes: 128 }],
+    128,
+  );
+
+  expect(JSON.parse(requestBody)).toEqual({
+    receiverToken: "receiver-token-receiver-token",
+    completedFiles: [{ id: "file-1", bytes: 128 }],
+    totalBytes: 128,
+  });
 });

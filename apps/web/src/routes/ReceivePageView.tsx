@@ -14,7 +14,8 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
   const hideLivePanels =
     flow.stage === "occupied" ||
     flow.stage === "completion-notice" ||
-    flow.stage === "retry-exhausted";
+    flow.stage === "retry-exhausted" ||
+    flow.stage === "ended";
   const openEntryDisabled =
     flow.stage === "loading" ||
     flow.stage === "claiming" ||

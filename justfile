@@ -9,7 +9,16 @@ setup:
   bunx playwright install chromium
 
 dev:
-  trap 'kill 0' EXIT; bun run dev:signal & bun run dev:web & wait
+  bun run dev:cloudflare
+
+dev-edge:
+  bun run dev:edge
+
+dev-cloudflare:
+  bun run dev:cloudflare
+
+deploy-cloudflare:
+  bun run deploy:cloudflare
 
 lint:
   bun run lint

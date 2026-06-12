@@ -184,3 +184,65 @@ test("sender fallback resumes from the receiver completed-file offset", async ()
     receiver.stop();
   }
 });
+
+test("receiver fallback keeps completed files and restarts unfinished work at file boundary", async () => {
+  const sessionId = `session-${crypto.randomUUID()}`;
+  const manifest: FileManifestItem[] = [
+    { id: "file-1", name: "alpha.txt", size: 5 },
+    { id: "file-2", name: "beta.txt", size: 4 },
+  ];
+  const files = [
+    new File(["alpha"], "alpha.txt", { type: "text/plain" }),
+    new File(["beta"], "beta.txt", { type: "text/plain" }),
+  ];
+  const retainedFile: ReceivedFile = {
+    id: "file-1",
+    name: "alpha.txt",
+    size: 5,
+    blob: new Blob(["alpha"]),
+    url: "blob:alpha",
+  };
+  const newlyReceived: ReceivedFile[] = [];
+  const completion = Promise.withResolvers<void>();
+
+  const sender = await startSenderTestFallbackRuntime(sessionId, "sender-token", files, manifest, {
+    onComplete() {},
+    onError(message) {
+      completion.reject(new Error(message));
+    },
+    onMode() {},
+    onProgress() {},
+    onStatus() {},
+  });
+  const receiver = await startReceiverTestFallbackRuntime(
+    sessionId,
+    "receiver-token",
+    manifest,
+    {
+      onComplete() {
+        completion.resolve();
+      },
+      onEnded() {},
+      onError(message) {
+        completion.reject(new Error(message));
+      },
+      onFileReceived(file) {
+        newlyReceived.push(file);
+      },
+      onMode() {},
+      onProgress() {},
+      onStatus() {},
+    },
+    [retainedFile],
+  );
+
+  try {
+    await completion.promise;
+    expect(newlyReceived.map((file) => file.name)).toEqual(["beta.txt"]);
+    expect(await newlyReceived[0]?.blob.text()).toBe("beta");
+    expect(await retainedFile.blob.text()).toBe("alpha");
+  } finally {
+    sender.stop();
+    receiver.stop();
+  }
+});

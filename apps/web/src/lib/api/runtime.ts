@@ -9,6 +9,8 @@ import type {
   ClaimSessionResponse,
   ClaimSessionState,
   CreateSessionResponse,
+  ReleaseSessionResponse,
+  ReleaseSessionStatus,
   SessionPublicView,
   SignalRole,
 } from "./types";
@@ -19,6 +21,11 @@ const CLAIM_STATES: Record<ClaimSessionState, true> = {
   completed: true,
   ended: true,
   failed: true,
+};
+
+const RELEASE_STATUSES: Record<ReleaseSessionStatus, true> = {
+  released: true,
+  "invalid-token": true,
 };
 
 function requestOrigin() {
@@ -213,16 +220,37 @@ export async function claimSession(sessionId: string, receiverToken?: string | n
 }
 
 export async function releaseSession(sessionId: string, receiverToken: string) {
-  await requestJson(`/api/sessions/${sessionId}/release`, {
-    method: "POST",
-    body: JSON.stringify({ receiverToken }),
-  });
+  const payload = asObject(
+    await requestJson(`/api/sessions/${sessionId}/release`, {
+      method: "POST",
+      body: JSON.stringify({ receiverToken }),
+    }),
+  );
+  if (!payload) {
+    throw new Error("Release response is invalid.");
+  }
+
+  const release = asString(payload.release ?? payload.status);
+  if (!(release in RELEASE_STATUSES)) {
+    throw new Error("Release response is missing a valid state.");
+  }
+
+  return {
+    ok: true,
+    session: normalizeSession(payload.session ?? payload),
+    release: release as ReleaseSessionStatus,
+  } satisfies ReleaseSessionResponse;
 }
 
-export async function completeSession(sessionId: string, receiverToken: string) {
+export async function completeSession(
+  sessionId: string,
+  receiverToken: string,
+  completedFiles: Array<{ id: string; bytes: number }>,
+  totalBytes: number,
+) {
   await requestJson(`/api/sessions/${sessionId}/complete`, {
     method: "POST",
-    body: JSON.stringify({ receiverToken }),
+    body: JSON.stringify({ receiverToken, completedFiles, totalBytes }),
   });
 }
 

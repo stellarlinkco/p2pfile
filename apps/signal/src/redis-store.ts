@@ -7,6 +7,7 @@ import {
   DEFAULT_RETRY_BUDGET,
   type EndSessionRequest,
   type ReleaseSessionRequest,
+  ReleaseSessionResponseSchema,
   SessionMutationResponseSchema,
   SessionPublicViewSchema,
   type SessionRole,
@@ -140,12 +141,13 @@ export class RedisSessionStore {
 
   async releaseSession(sessionId: string, input: ReleaseSessionRequest) {
     const session = await this.load(sessionId);
-    if (
-      !session ||
-      !isActiveSessionState(session.state) ||
-      session.receiverToken !== input.receiverToken
-    )
-      return null;
+    if (!session) return null;
+    if (!isActiveSessionState(session.state) || session.receiverToken !== input.receiverToken) {
+      return ReleaseSessionResponseSchema.parse({
+        status: "invalid-token",
+        session: toPublicSession(session),
+      });
+    }
     session.state = "waiting";
     session.receiverToken = null;
     session.retriesRemaining = DEFAULT_RETRY_BUDGET;
@@ -153,7 +155,10 @@ export class RedisSessionStore {
     session.openExpiresAt = this.now() + this.openSessionTtlMs;
     this.sockets.detach(sessionId, "receiver");
     await this.save(session);
-    return SessionMutationResponseSchema.parse({ ok: true, session: toPublicSession(session) });
+    return ReleaseSessionResponseSchema.parse({
+      status: "released",
+      session: toPublicSession(session),
+    });
   }
 
   async completeSession(sessionId: string, input: CompleteSessionRequest) {

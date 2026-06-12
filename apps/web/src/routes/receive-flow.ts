@@ -1,16 +1,10 @@
 import type { TransferMode } from "@p2pfile/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import {
-  claimSession,
-  completeSession,
-  releaseSession,
-  resolveAccessCode,
-  type SessionPublicView,
-} from "../lib/api";
-import { clearReceiverToken, readReceiverToken, writeReceiverToken } from "../lib/session-storage";
+import { releaseSession, resolveAccessCode, type SessionPublicView } from "../lib/api";
+import { clearReceiverToken, readReceiverToken } from "../lib/session-storage";
 import type { ReceivedFile, ReceiverRuntime, TransferProgress } from "../lib/transfer";
-import { startReceiverRuntime } from "../lib/transfer";
+import { claimReceiverSession } from "./receive-flow-claim";
 import {
   clearReceivedFiles,
   revokeReceivedFiles,
@@ -19,18 +13,8 @@ import {
 import { loadReceiverSession } from "./receive-flow-loader";
 import { useSenderEndedPolling } from "./receive-flow-polling";
 import type { ReceiveFlowState } from "./receive-flow-types";
-import {
-  initialProgress,
-  RETRY_EXHAUSTED_STATUS,
-  type ReceiverStage,
-  receiverStageFromClaim,
-  sessionIdFromEntry,
-} from "./receive-flow-utils";
-import {
-  cacheReceivedFile,
-  clearCachedReceivedFiles,
-  readCachedReceivedFiles,
-} from "./received-file-cache";
+import { initialProgress, type ReceiverStage, sessionIdFromEntry } from "./receive-flow-utils";
+import { clearCachedReceivedFiles } from "./received-file-cache";
 
 export function useReceiveFlow(): ReceiveFlowState {
   const { sessionId: routeSessionId } = useParams();
@@ -71,6 +55,7 @@ export function useReceiveFlow(): ReceiveFlowState {
         setStatus,
         setError,
         setRetriesRemaining,
+        setReceivedFiles,
       });
     },
     [navigate],
@@ -139,123 +124,24 @@ export function useReceiveFlow(): ReceiveFlowState {
     }
   }
   async function claimCurrentSession() {
-    if (!session) {
-      return;
-    }
-    const currentReceiverToken = readReceiverToken(session.sessionId);
-    const memoryFiles = receivedFilesRef.current;
-    const cachedFiles = currentReceiverToken
-      ? await readCachedReceivedFiles(session.sessionId, session.files)
-      : [];
-    const resumeFiles = memoryFiles.length >= cachedFiles.length ? memoryFiles : cachedFiles;
-    stopReceiverRuntime(runtimeRef);
-    setStage("claiming");
-    setError(null);
-    setStatus("正在 claim 会话…");
-    sampleRef.current = null;
-
-    try {
-      const response = await claimSession(session.sessionId, currentReceiverToken);
-      const retryingSameReceiver =
-        response.claim === "claimed" &&
-        currentReceiverToken !== null &&
-        response.receiverToken === currentReceiverToken;
-      const resumedFiles =
-        retryingSameReceiver || (response.claim === "completed" && response.originalReceiver)
-          ? resumeFiles
-          : [];
-      if (!retryingSameReceiver && response.claim === "claimed" && resumeFiles.length > 0) {
-        clearReceivedFiles(receivedFilesRef, setReceivedFiles);
-        void clearCachedReceivedFiles(session.sessionId);
-      }
-      setSession(response.session);
-      setProgress(initialProgress(response.session, resumedFiles.length));
-      setStage(receiverStageFromClaim(response));
-      setRetriesRemaining(response.claim === "claimed" ? response.retriesRemaining : null);
-
-      if (response.claim === "failed") {
-        setStatus(RETRY_EXHAUSTED_STATUS);
-        return;
-      }
-
-      if (response.claim === "occupied") {
-        setStatus("Occupied Session Notice：已有另一个接收方 claim 了该会话。");
-        return;
-      }
-
-      if (response.claim === "ended") {
-        setStatus("Sender-Ended Session：发送方已结束当前会话，请请求重新创建。");
-        return;
-      }
-
-      if (response.claim === "completed") {
-        setStatus(
-          response.originalReceiver
-            ? "Completed Session View：该接收方可查看短暂只读结果态。"
-            : "Completion Notice：该会话已完成；如需重新接收，请让发送方重新创建。",
-        );
-        return;
-      }
-
-      if (!response.receiverToken) {
-        throw new Error("Claim succeeded without Receiver Token.");
-      }
-
-      writeReceiverToken(session.sessionId, response.receiverToken);
-      setStatus("已 claim，会话排他。正在建立 WebRTC DataChannel…");
-      runtimeRef.current = await startReceiverRuntime(
-        session.sessionId,
-        response.receiverToken,
-        response.session.files,
-        {
-          onStatus(nextStatus) {
-            setStatus(nextStatus);
-            setStage(nextStatus.includes("Receiving") ? "receiving" : "connecting");
-          },
-          onMode(nextMode) {
-            setMode(nextMode);
-          },
-          onProgress(nextProgress) {
-            setProgress(nextProgress);
-            setStage("receiving");
-            const now = Date.now();
-            const lastSample = sampleRef.current;
-            if (lastSample) {
-              const elapsed = (now - lastSample.at) / 1000;
-              if (elapsed > 0) {
-                setSpeed(Math.max(0, (nextProgress.completedBytes - lastSample.bytes) / elapsed));
-              }
-            }
-            sampleRef.current = { bytes: nextProgress.completedBytes, at: now };
-          },
-          onFileReceived(file) {
-            setReceivedFiles((current) => {
-              void cacheReceivedFile(session.sessionId, file, current.length);
-              return [...current, file];
-            });
-          },
-          onComplete() {
-            setStage("completed");
-            setStatus("Completed Session View：全部文件已接收并通过字节数校验。");
-            void completeSession(session.sessionId, response.receiverToken ?? "");
-          },
-          onEnded() {
-            setStage("ended");
-            setStatus("Sender-Ended Session：发送方已离开，请请求重新创建会话。");
-          },
-          onError(message) {
-            setError(message);
-            setStage("failed");
-          },
-        },
-        resumedFiles,
-      );
-    } catch (claimError) {
-      setError(claimError instanceof Error ? claimError.message : "Claim 失败。");
-      setStage("failed");
-      setStatus("Claim 或连接失败。请重试或请求发送方重新创建会话。");
-    }
+    await claimReceiverSession({
+      session,
+      currentReceiverToken: session ? readReceiverToken(session.sessionId) : null,
+      runtimeRef,
+      sampleRef,
+      receivedFilesRef,
+      setSession,
+      setStage,
+      setStatus,
+      setMode,
+      setProgress,
+      setSpeed,
+      setReceivedFiles,
+      setRetriesRemaining,
+      setError,
+    });
   }
+
   async function releaseCurrentClaim() {
     if (!session) {
       return;
@@ -268,7 +154,14 @@ export function useReceiveFlow(): ReceiveFlowState {
 
     try {
       stopReceiverRuntime(runtimeRef);
-      await releaseSession(session.sessionId, token);
+      const release = await releaseSession(session.sessionId, token);
+      if (release.release === "invalid-token") {
+        setSession(release.session);
+        setProgress(initialProgress(release.session));
+        setMode(release.session.transferMode);
+        setStatus("Receiver Token 无效，当前 claim 未释放。请刷新后重试。");
+        return;
+      }
       clearReceiverToken(session.sessionId);
       clearReceivedFiles(receivedFilesRef, setReceivedFiles);
       void clearCachedReceivedFiles(session.sessionId);

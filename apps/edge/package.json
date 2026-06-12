@@ -1,0 +1,18 @@
+{
+  "name": "@p2pfile/edge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "bun build src/index.ts --outdir dist --target browser"
+  },
+  "dependencies": {
+    "@p2pfile/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250617.0",
+    "wrangler": "^4.20.3"
+  }
+}

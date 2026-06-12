@@ -1,0 +1,21 @@
+name = "p2p-file-edge"
+main = "apps/edge/src/index.ts"
+compatibility_date = "2026-06-12"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./apps/web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[[durable_objects.bindings]]
+name = "SESSION_OBJECT"
+class_name = "SessionDurableObject"
+
+[[durable_objects.bindings]]
+name = "SESSION_DIRECTORY"
+class_name = "SessionDirectory"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionDurableObject", "SessionDirectory"]

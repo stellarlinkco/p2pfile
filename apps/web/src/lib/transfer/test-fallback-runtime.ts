@@ -202,9 +202,6 @@ export async function startReceiverTestFallbackRuntime(
   let completed = false;
 
   if (receivedFiles.length > 0) {
-    for (const file of receivedFiles) {
-      handlers.onFileReceived(file);
-    }
     state.receivedFiles = receivedFiles.length;
     state.completedBytes = receivedFiles.reduce((sum, file) => sum + file.size, 0);
     restoreProgressState(expected, receivedFiles, handlers);

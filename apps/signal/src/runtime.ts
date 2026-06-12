@@ -7,6 +7,7 @@ import {
   DEFAULT_RETRY_BUDGET,
   type EndSessionRequest,
   type ReleaseSessionRequest,
+  ReleaseSessionResponseSchema,
   SessionMutationResponseSchema,
   SessionPublicViewSchema,
   type SessionRole,
@@ -145,19 +146,23 @@ export class LiveSessionStore {
   releaseSession(sessionId: string, input: ReleaseSessionRequest) {
     this.sweepExpired();
     const session = this.sessions.get(sessionId);
-    if (
-      !session ||
-      !isActiveSessionState(session.state) ||
-      session.receiverToken !== input.receiverToken
-    )
-      return null;
+    if (!session) return null;
+    if (!isActiveSessionState(session.state) || session.receiverToken !== input.receiverToken) {
+      return ReleaseSessionResponseSchema.parse({
+        status: "invalid-token",
+        session: toPublicSession(session),
+      });
+    }
     session.state = "waiting";
     session.receiverToken = null;
     session.retriesRemaining = DEFAULT_RETRY_BUDGET;
     session.failureReason = undefined;
     session.openExpiresAt = this.now() + this.openSessionTtlMs;
     detachSocket(session, "receiver");
-    return SessionMutationResponseSchema.parse({ ok: true, session: toPublicSession(session) });
+    return ReleaseSessionResponseSchema.parse({
+      status: "released",
+      session: toPublicSession(session),
+    });
   }
 
   completeSession(sessionId: string, input: CompleteSessionRequest) {

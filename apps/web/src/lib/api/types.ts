@@ -38,4 +38,12 @@ export type ClaimSessionResponse = {
   originalReceiver: boolean;
 };
 
+export type ReleaseSessionStatus = "released" | "invalid-token";
+
+export type ReleaseSessionResponse = {
+  ok: true;
+  session: SessionPublicView;
+  release: ReleaseSessionStatus;
+};
+
 export type SignalRole = "sender" | "receiver";

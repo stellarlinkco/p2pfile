@@ -16,6 +16,9 @@ ignored_directories:
   - "coverage"
   - "playwright-report"
   - "test-results"
+  - ".wrangler"
+  - ".agents"
+  - ".omp"
 dependency_boundary_rules:
   "apps/web":
     - "apps/signal"

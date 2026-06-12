@@ -214,9 +214,17 @@ test("complete and end endpoints reject invalid tokens", async () => {
   );
   const claim = await claimResponse.json();
 
+  const completedFiles = body.session.manifest.map(
+    ({ id, size }: { id: string; size: number }) => ({
+      id,
+      bytes: size,
+    }),
+  );
   const invalidComplete = await app.request(
     createJsonRequest("POST", `/api/sessions/${body.sessionId}/complete`, {
       receiverToken: "invalid-token-invalid-token",
+      completedFiles,
+      totalBytes: body.session.summary.totalSize,
     }),
   );
   const invalidEnd = await app.request(
@@ -231,6 +239,8 @@ test("complete and end endpoints reject invalid tokens", async () => {
   const complete = await app.request(
     createJsonRequest("POST", `/api/sessions/${body.sessionId}/complete`, {
       receiverToken: claim.receiverToken,
+      completedFiles,
+      totalBytes: body.session.summary.totalSize,
     }),
   );
   const completeBody = await complete.json();

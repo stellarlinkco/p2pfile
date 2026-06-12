@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   ClaimSessionResponseSchema,
+  CompleteSessionRequestSchema,
   CreateSessionRequestSchema,
   DEFAULT_RETRY_BUDGET,
+  ReleaseSessionResponseSchema,
   SessionStateSchema,
   SignalEnvelopeSchema,
 } from "./session";
@@ -71,6 +73,23 @@ test("create session request parses a frozen manifest", () => {
   expect(parsed.manifest[0]?.name).toBe("hello.txt");
 });
 
+test("complete session request requires full-manifest integrity proof", () => {
+  const parsed = CompleteSessionRequestSchema.parse({
+    receiverToken: "receiver-token-receiver-token",
+    completedFiles: [{ id: "file-1", bytes: 128 }],
+    totalBytes: 128,
+  });
+
+  expect(parsed.completedFiles).toEqual([{ id: "file-1", bytes: 128 }]);
+  expect(() =>
+    CompleteSessionRequestSchema.parse({
+      receiverToken: "receiver-token-receiver-token",
+      completedFiles: [],
+      totalBytes: 0,
+    }),
+  ).toThrow();
+});
+
 test("claim session response allows occupied status without receiver token", () => {
   const parsed = ClaimSessionResponseSchema.parse({
     status: "occupied",
@@ -92,6 +111,44 @@ test("claim session response allows occupied status without receiver token", () 
 
   expect(parsed.status).toBe("occupied");
   expect(parsed.session.claimed).toBe(true);
+});
+
+test("release session response covers released and invalid-token statuses", () => {
+  const released = ReleaseSessionResponseSchema.parse({
+    status: "released",
+    session: {
+      sessionId: "session-123",
+      state: "waiting",
+      manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+      summary: { fileCount: 1, totalSize: 128 },
+      transferMode: "direct",
+      canClaim: true,
+      claimed: false,
+      completed: false,
+      ended: false,
+      expiresAt: 123456,
+      retriesRemaining: DEFAULT_RETRY_BUDGET,
+    },
+  });
+  const invalid = ReleaseSessionResponseSchema.parse({
+    status: "invalid-token",
+    session: {
+      sessionId: "session-123",
+      state: "claimed",
+      manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+      summary: { fileCount: 1, totalSize: 128 },
+      transferMode: "direct",
+      canClaim: false,
+      claimed: true,
+      completed: false,
+      ended: false,
+      expiresAt: null,
+      retriesRemaining: 2,
+    },
+  });
+
+  expect(released.status).toBe("released");
+  expect(invalid.status).toBe("invalid-token");
 });
 
 test("signal envelope validates webrtc and mode payloads", () => {
@@ -134,4 +191,53 @@ test("signal envelope accepts empty ICE candidate end markers", () => {
     type: "ice-candidate",
     payload: { candidate: "" },
   });
+});
+
+test("signal envelope validates relay frames and base64 chunk payloads", () => {
+  const relayReady = SignalEnvelopeSchema.parse({
+    type: "relay-ready",
+    payload: {},
+  });
+  const relayMessage = SignalEnvelopeSchema.parse({
+    type: "relay-message",
+    payload: {
+      sequence: 7,
+      message: {
+        type: "chunk",
+        fileId: "file-1",
+        bytesBase64: "YWJj",
+      },
+    },
+  });
+  const relayAck = SignalEnvelopeSchema.parse({
+    type: "relay-ack",
+    payload: {
+      sequence: 7,
+    },
+  });
+
+  expect(relayReady.type).toBe("relay-ready");
+  if (relayMessage.type !== "relay-message" || relayAck.type !== "relay-ack") {
+    throw new Error("expected relay frames");
+  }
+
+  expect(relayMessage.payload.message).toEqual({
+    type: "chunk",
+    fileId: "file-1",
+    bytesBase64: "YWJj",
+  });
+  expect(relayAck.payload.sequence).toBe(7);
+  expect(() =>
+    SignalEnvelopeSchema.parse({
+      type: "relay-message",
+      payload: {
+        sequence: 8,
+        message: {
+          type: "chunk",
+          fileId: "file-1",
+          bytes: new ArrayBuffer(1),
+        },
+      },
+    }),
+  ).toThrow();
 });

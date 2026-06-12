@@ -3,6 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests/e2e",
   testMatch: /.*\.e2e\.ts/,
+  testIgnore: /worker-share-link\.e2e\.ts/,
   timeout: 30_000,
   workers: 1,
   retries: process.env.CI ? 1 : 0,

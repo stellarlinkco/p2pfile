@@ -2,14 +2,14 @@ import type { TransferMode } from "@p2pfile/shared";
 import type { SessionPublicView } from "../lib/api";
 import { claimSession, getSession } from "../lib/api";
 import { readReceiverToken } from "../lib/session-storage";
-import type { TransferProgress } from "../lib/transfer";
+import type { ReceivedFile, TransferProgress } from "../lib/transfer";
 import {
   initialProgress,
   RETRY_EXHAUSTED_STATUS,
   type ReceiverStage,
-  receiverStageFromClaim,
   receiverStageFromSession,
 } from "./receive-flow-utils";
+import { readCachedReceivedFiles } from "./received-file-cache";
 
 export type ReceiveSessionLoaderContext = {
   navigate: (to: string, options: { replace: boolean }) => void;
@@ -20,6 +20,7 @@ export type ReceiveSessionLoaderContext = {
   setStatus: (status: string) => void;
   setError: (error: string | null) => void;
   setRetriesRemaining: (retriesRemaining: number | null) => void;
+  setReceivedFiles: (files: ReceivedFile[]) => void;
 };
 
 const MANIFEST_LOADED_STATUS = "Frozen Manifest 已载入。点击“接收全部文件”后才会开始传输。";
@@ -49,12 +50,15 @@ export async function loadReceiverSession(
       context.setSession(completed.session);
       context.setProgress(initialProgress(completed.session));
       context.setMode(completed.session.transferMode);
-      context.setStage(receiverStageFromClaim(completed));
-      context.setStatus(
-        completed.originalReceiver
-          ? "Completed Session View：该接收方可查看短暂只读结果态。"
-          : "Completion Notice：该会话已完成；如需重新接收，请让发送方重新创建。",
-      );
+      if (completed.originalReceiver) {
+        context.setReceivedFiles(await readCachedReceivedFiles(sessionId, completed.session.files));
+        context.setStage("completed");
+        context.setStatus("Completed Session View：该接收方可查看短暂只读结果态。");
+      } else {
+        context.setReceivedFiles([]);
+        context.setStage("completion-notice");
+        context.setStatus("Completion Notice：该会话已完成；如需重新接收，请让发送方重新创建。");
+      }
     } else if (nextSession.status === "claimed") {
       const claimed = await claimSession(sessionId, receiverToken);
       if (claimed.claim === "occupied") {

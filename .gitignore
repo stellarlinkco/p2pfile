@@ -10,3 +10,7 @@ test-results/
 tmp/
 *.log
 *.bak.*
+.wrangler/
+.agents/
+.mission-active
+.omp/

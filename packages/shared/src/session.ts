@@ -101,8 +101,26 @@ export const ReleaseSessionRequestSchema = z.object({
   receiverToken: SessionTokenSchema,
 });
 
+export const ReleaseSessionResponseSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("released"),
+    session: SessionPublicViewSchema,
+  }),
+  z.object({
+    status: z.literal("invalid-token"),
+    session: SessionPublicViewSchema,
+  }),
+]);
+
+const CompletedManifestItemSchema = z.object({
+  id: z.string().min(1),
+  bytes: z.number().int().nonnegative(),
+});
+
 export const CompleteSessionRequestSchema = z.object({
   receiverToken: SessionTokenSchema,
+  completedFiles: z.array(CompletedManifestItemSchema).min(1),
+  totalBytes: z.number().int().nonnegative(),
 });
 
 export const EndSessionRequestSchema = z.object({
@@ -141,6 +159,33 @@ const RTCSessionDescriptionPayloadSchema = z.object({
   type: z.enum(["offer", "answer"]),
   sdp: z.string().min(1),
 });
+
+const RelayProtocolMessageSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("manifest"),
+    files: z.array(FileManifestItemSchema).min(1),
+    totalBytes: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("file-start"),
+    file: FileManifestItemSchema,
+  }),
+  z.object({
+    type: z.literal("chunk"),
+    fileId: z.string().min(1),
+    bytesBase64: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal("file-end"),
+    fileId: z.string().min(1),
+    bytes: z.number().int().nonnegative(),
+    digest: z.string().regex(/^[0-9a-f]{64}$/),
+  }),
+  z.object({
+    type: z.literal("complete"),
+    totalBytes: z.number().int().nonnegative(),
+  }),
+]);
 
 export const SignalEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({
@@ -192,7 +237,7 @@ export const SignalEnvelopeSchema = z.discriminatedUnion("type", [
     type: z.literal("relay-message"),
     payload: z.object({
       sequence: z.number().int().nonnegative(),
-      message: z.unknown(),
+      message: RelayProtocolMessageSchema,
     }),
   }),
   z.object({
@@ -206,8 +251,17 @@ export const SignalEnvelopeSchema = z.discriminatedUnion("type", [
     payload: ReceiverCompletedStatusSchema,
   }),
 ]);
+export const DirectSignalEnvelopeSchema = SignalEnvelopeSchema.refine(
+  (envelope) =>
+    envelope.type === "offer" ||
+    envelope.type === "answer" ||
+    envelope.type === "ice-candidate" ||
+    envelope.type === "receiver-ready" ||
+    envelope.type === "mode",
+);
 
 export type TransferMode = z.infer<typeof TransferModeSchema>;
+export type DirectSignalEnvelope = z.infer<typeof DirectSignalEnvelopeSchema>;
 export type SessionRole = z.infer<typeof SessionRoleSchema>;
 export type SessionState = z.infer<typeof SessionStateSchema>;
 export type FileManifestItem = z.infer<typeof FileManifestItemSchema>;
@@ -216,6 +270,7 @@ export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 export type SessionPublicView = z.infer<typeof SessionPublicViewSchema>;
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>;
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>;
+export type ReleaseSessionResponse = z.infer<typeof ReleaseSessionResponseSchema>;
 export type ClaimSessionRequest = z.infer<typeof ClaimSessionRequestSchema>;
 export type ClaimSessionResponse = z.infer<typeof ClaimSessionResponseSchema>;
 export type ReleaseSessionRequest = z.infer<typeof ReleaseSessionRequestSchema>;

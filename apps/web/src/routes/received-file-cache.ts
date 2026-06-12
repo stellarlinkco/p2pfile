@@ -20,6 +20,9 @@ function cacheKey(sessionId: string, index: number) {
 }
 
 function openCache() {
+  if (typeof indexedDB === "undefined") {
+    return Promise.reject(new Error("Received file cache unavailable."));
+  }
   const { promise, reject, resolve } = Promise.withResolvers<IDBDatabase>();
   const request = indexedDB.open(DB_NAME, DB_VERSION);
   request.onupgradeneeded = () => {

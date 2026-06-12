@@ -28,19 +28,20 @@ This v1 intentionally does not provide folder transfer, partial receive, sender 
 ## Repository layout
 
 ```text
-apps/web        React 19 + Vite sender/receiver app
-apps/signal     Hono-on-Bun signaling API and WebSocket service
+apps/web        React 19 + Vite sender/receiver app built into Cloudflare Static Assets
+apps/edge       Cloudflare Worker API, WebSocket relay, Durable Objects, and SPA fallback
+apps/signal     legacy Bun signaling service kept for non-Worker experiments
 packages/shared Zod schemas, protocol types, shared constants
 tests/e2e       Playwright browser E2E coverage
-scripts         repo guard scripts for naming, size, and dependency boundaries
+scripts         repo guard scripts for naming, size, dependency boundaries, and cutover checks
 ```
 
 ## Stack
 
 - Runtime/package manager/test runner: Bun 1.x
 - Frontend: React 19, TypeScript, Vite, React Router v7, Tailwind CSS 4
-- Signaling: Hono on Bun with WebSocket support
-- State: in-memory session store by default, Redis-backed session store when `REDIS_URL` is set
+- Runtime: Cloudflare Workers with Static Assets and Durable Objects
+- Local tooling: Bun 1.x, Wrangler, Playwright, Biome
 - Transfer: WebRTC DataChannel with STUN/TURN configuration and WebSocket relay fallback
 - Validation: Zod, Bun test, Playwright, Biome
 
@@ -51,90 +52,67 @@ just setup
 just dev
 ```
 
-Local services:
+Local Cloudflare parity service:
 
-- Web app: `http://127.0.0.1:4173`
-- Signal status: `http://127.0.0.1:3001/api/status`
-
+- Worker app, API, WebSocket signaling, and SPA fallback: `http://127.0.0.1:8788`
+- Status endpoint: `http://127.0.0.1:8788/api/status`
 If `just` is not installed, use the equivalent Bun scripts from `package.json`.
 
 ## Configuration
 
-Build-time and runtime variables:
+Build-time variables:
 
 ```bash
-REDIS_URL=redis://127.0.0.1:6379
-VITE_SIGNAL_ORIGIN=https://signal.example.com
 VITE_TURN_URL=turn:turn.example.com:3478
 VITE_TURN_USERNAME=example-user
 VITE_TURN_CREDENTIAL=example-password
 ```
 
-Without `REDIS_URL`, the signal service uses the in-memory live session store for local development and tests.
+The browser client uses same-origin `/api/*` and `/ws/*` by default, so the Cloudflare route does not need a separate signal origin.
+Wrangler reads the Worker entrypoint, Static Assets binding, Durable Object bindings, and Durable Object migrations from `wrangler.toml`.
 
-## Deployment conditions
+## Cloudflare deployment
 
-Current deployment needs two services:
+`wrangler.toml` is the approved deployment contract:
 
-- **Web**: serves the built Vite SPA and must provide history fallback for `/`, `/receive`, and `/f/:sessionId`.
-- **Signal**: serves HTTP session APIs and the WebSocket signaling endpoint on `/ws/:sessionId/:role/:token`.
+- Worker entrypoint: `apps/edge/src/index.ts`
+- Static Assets: `./apps/web/dist` bound as `ASSETS`
+- SPA fallback: `not_found_handling = "single-page-application"` for `/`, `/receive`, and `/f/:sessionId`
+- Worker API routes: `/api/*`
+- Worker WebSocket routes: `/ws/*`
+- Durable Objects: `SESSION_OBJECT` (`SessionDurableObject`) and `SESSION_DIRECTORY` (`SessionDirectory`) with SQLite migrations
 
-Recommended production conditions:
-
-- Public HTTPS for the web origin.
-- Public HTTPS/WSS for the signal origin.
-- WebSocket upgrade support on the signal reverse proxy.
-- **Redis** via `REDIS_URL` when running more than one signal instance. Without Redis, session state stays in-memory and is only safe for a single signal container/process.
-- **TURN** credentials when transfers must work across restrictive NAT/firewall environments. The web build reads `VITE_TURN_URL`, `VITE_TURN_USERNAME`, and `VITE_TURN_CREDENTIAL`.
-- Set `VITE_SIGNAL_ORIGIN` at web build time when the web and signal services are on different origins.
-
-## Docker
-
-This repository ships a multi-target root `Dockerfile`.
-
-Build the web image:
+Use the Cloudflare command surface:
 
 ```bash
-docker build \
-  --target web \
-  --build-arg VITE_SIGNAL_ORIGIN=https://signal.example.com \
-  --build-arg VITE_TURN_URL=turn:turn.example.com:3478 \
-  --build-arg VITE_TURN_USERNAME=example-user \
-  --build-arg VITE_TURN_CREDENTIAL=example-password \
-  -t p2pfile-web .
+bun run dev:cloudflare     # builds apps/web/dist, then starts wrangler dev
+bun run deploy:cloudflare  # builds apps/web/dist, then runs wrangler deploy
 ```
 
-Build the signal image:
+The Cloudflare route is a single Worker deployment. It does not need the legacy signal service, a reverse proxy, or an external live-session store for the approved path.
+TURN credentials are still optional for restrictive NAT/firewall environments; transfer contents remain browser-to-browser or in-flight relay frames only.
 
-```bash
-docker build --target signal -t p2pfile-signal .
-```
 
-Run the signal container:
+## Cost and plan
 
-```bash
-docker run --rm -p 3001:3001 \
-  -e REDIS_URL=redis://redis:6379 \
-  p2pfile-signal
-```
-
-Run the web container:
-
-```bash
-docker run --rm -p 8080:80 p2pfile-web
-```
+- The current Cloudflare deployment uses SQLite-backed Durable Objects, so it can run on the Workers Free plan.
+- Free-plan limits are enforced as hard caps. If you exceed them, the affected operation fails instead of silently billing overage.
+- Workers Paid starts at $5/month. Cloudflare budget alerts notify on spend thresholds but do not stop usage.
+- If you want a hard stop at your own quota, add an application-level gate before creating new sessions or accepting new sockets.
 
 ## Validation commands
 
 Use the root `justfile` as the canonical command surface:
 
 ```bash
-just lint       # naming, file length, dependency boundaries, Biome
-just typecheck  # shared, signal, and web TypeScript validation
-just test-unit  # Bun unit/integration tests
-just test-e2e   # Playwright browser E2E tests
-just build      # workspace builds
-just check      # lint + typecheck + tests + build
+just dev-cloudflare     # builds apps/web/dist, then starts wrangler dev on the Worker path
+just deploy-cloudflare  # builds apps/web/dist, then runs wrangler deploy
+just lint               # naming, file length, dependency boundaries, Biome
+just typecheck          # shared, signal, web, and edge TypeScript validation
+just test-unit          # Bun unit/integration tests, including Cloudflare cutover validation
+just test-e2e           # Playwright browser E2E tests
+just build              # workspace builds
+just check              # lint + typecheck + tests + build
 ```
 
 Current E2E coverage includes Share Link entry, Access Code entry, QR Code entry, direct transfer, relay fallback disclosure, retry-budget exhaustion, interrupted receiver resume, occupied sessions, sender-ended sessions, storage failure handling, and mobile no-horizontal-overflow checks.
@@ -144,7 +122,7 @@ Current E2E coverage includes Share Link entry, Access Code entry, QR Code entry
 - Share Links are bearer credentials.
 - Share surfaces are marked non-indexable and previews stay generic.
 - Frozen Manifest exposes metadata only before claim; no file thumbnails or content preview are shown.
-- The signaling service coordinates sessions and signals; file contents are not uploaded to application storage.
+- The Worker coordinates sessions and signals; file contents are not uploaded to application storage.
 
 ## Documentation
 

@@ -8,7 +8,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-const signalSessionPayload = (state: "claimed" | "failed") => ({
+const signalSessionPayload = (state: "claimed" | "failed" | "completed-view") => ({
   sessionId: "abcdefabcdef",
   state,
   manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
@@ -16,9 +16,9 @@ const signalSessionPayload = (state: "claimed" | "failed") => ({
   transferMode: "direct",
   canClaim: false,
   claimed: state === "claimed",
-  completed: false,
+  completed: state === "completed-view",
   ended: false,
-  expiresAt: null,
+  expiresAt: state === "completed-view" ? Date.now() + 120_000 : null,
   retriesRemaining: 2,
 });
 
@@ -38,6 +38,7 @@ const createContext = () => {
   const stages: ReceiverStage[] = [];
   const statuses: string[] = [];
   const retries: Array<number | null> = [];
+  const receivedFiles: Array<{ id: string; name: string; size: number }[]> = [];
   const context: ReceiveSessionLoaderContext = {
     navigate() {},
     setSession() {},
@@ -53,8 +54,11 @@ const createContext = () => {
     setRetriesRemaining(value) {
       retries.push(value);
     },
+    setReceivedFiles(files) {
+      receivedFiles.push(files);
+    },
   };
-  return { context, stages, statuses, retries };
+  return { context, stages, statuses, retries, receivedFiles };
 };
 
 test("visitor loading a failed session gets retry-exhausted guidance", async () => {
@@ -82,4 +86,40 @@ test("original receiver re-entry surfaces the remaining retry budget", async () 
   await loadReceiverSession("abcdefabcdef", false, context);
 
   expect(retries.at(-1)).toBe(1);
+});
+
+test("original receiver can re-open a completed session view", async () => {
+  stubResponses([
+    signalSessionPayload("completed-view"),
+    {
+      status: "completed",
+      originalReceiver: true,
+      session: signalSessionPayload("completed-view"),
+    },
+  ]);
+  const { context, stages, statuses, receivedFiles } = createContext();
+
+  await loadReceiverSession("abcdefabcdef", false, context);
+
+  expect(stages.at(-1)).toBe("completed");
+  expect(statuses.at(-1)).toContain("Completed Session View");
+  expect(receivedFiles.at(-1)).toEqual([]);
+});
+
+test("non-owning visitors to completed sessions get only Completion Notice", async () => {
+  stubResponses([
+    signalSessionPayload("completed-view"),
+    {
+      status: "completed",
+      originalReceiver: false,
+      session: signalSessionPayload("completed-view"),
+    },
+  ]);
+  const { context, stages, statuses, receivedFiles } = createContext();
+
+  await loadReceiverSession("abcdefabcdef", false, context);
+
+  expect(stages.at(-1)).toBe("completion-notice");
+  expect(statuses.at(-1)).toContain("Completion Notice");
+  expect(receivedFiles.at(-1)).toEqual([]);
 });

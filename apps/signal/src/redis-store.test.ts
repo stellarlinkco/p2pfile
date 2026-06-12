@@ -50,7 +50,11 @@ async function createClaimedSession(store: RedisSessionStore) {
 test("RedisSessionStore preserves completed and ended terminal claim states", async () => {
   const completedStore = createMemoryStore();
   const { claimed, created } = await createClaimedSession(completedStore);
-  await completedStore.completeSession(created.sessionId, { receiverToken: claimed.receiverToken });
+  await completedStore.completeSession(created.sessionId, {
+    receiverToken: claimed.receiverToken,
+    completedFiles: created.session.manifest.map(({ id, size }) => ({ id, bytes: size })),
+    totalBytes: created.session.summary.totalSize,
+  });
 
   const completedClaim = await completedStore.claimSession(
     created.sessionId,
@@ -75,6 +79,8 @@ test("RedisSessionStore keeps completed view for the configured TTL", async () =
 
   const completed = await store.completeSession(created.sessionId, {
     receiverToken: claimed.receiverToken,
+    completedFiles: created.session.manifest.map(({ id, size }) => ({ id, bytes: size })),
+    totalBytes: created.session.summary.totalSize,
   });
   expect(completed?.session.expiresAt).toBe(1_500);
 
