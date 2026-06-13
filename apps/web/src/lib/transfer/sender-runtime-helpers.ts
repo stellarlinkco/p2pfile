@@ -1,7 +1,7 @@
 import type { FileManifestItem } from "@p2pfile/shared";
-import { computeDigestHex } from "./digest";
+import { createSha256Digest } from "./digest";
 import type { RelayMessageQueue } from "./relay-queue";
-import { awaitBufferedAmount, sendProtocolMessage } from "./runtime-shared";
+import { awaitBufferedAmount, sendDataChannelPayload, sendProtocolMessage } from "./runtime-shared";
 import type { SenderRuntimeHandlers, TransferProgress } from "./types";
 
 export type TransferPlan = {
@@ -82,7 +82,7 @@ export async function sendFiles(
     }
 
     let fileBytes = 0;
-    const sentChunks: ArrayBuffer[] = [];
+    const digest = createSha256Digest();
     sendProtocolMessage(channel, { type: "file-start", file: manifestItem });
 
     for (let offset = 0; offset < file.size; offset += 64 * 1024) {
@@ -91,8 +91,8 @@ export async function sendFiles(
       assertTransferActive(shouldContinue);
       const bytes = await file.slice(offset, offset + 64 * 1024).arrayBuffer();
       assertTransferActive(shouldContinue);
-      channel.send(bytes);
-      sentChunks.push(bytes);
+      sendDataChannelPayload(channel, bytes);
+      digest.update(bytes);
       fileBytes += bytes.byteLength;
       handlers.onProgress({
         fileId: manifestItem.id,
@@ -107,13 +107,11 @@ export async function sendFiles(
     }
 
     assertTransferActive(shouldContinue);
-    const digest = await computeDigestHex(sentChunks);
-    assertTransferActive(shouldContinue);
     sendProtocolMessage(channel, {
       type: "file-end",
       fileId: manifestItem.id,
       bytes: fileBytes,
-      digest,
+      digest: digest.digestHex(),
     });
     completedBytes += fileBytes;
     completedFiles += 1;
@@ -146,7 +144,7 @@ export async function sendFilesViaRelay(
     }
 
     let fileBytes = 0;
-    const sentChunks: ArrayBuffer[] = [];
+    const digest = createSha256Digest();
     await queue.send({ type: "file-start", file: manifestItem });
 
     for (let offset = 0; offset < file.size; offset += 64 * 1024) {
@@ -154,7 +152,7 @@ export async function sendFilesViaRelay(
       const bytes = await file.slice(offset, offset + 64 * 1024).arrayBuffer();
       assertTransferActive(shouldContinue);
       await queue.send({ type: "chunk", fileId: manifestItem.id, bytes });
-      sentChunks.push(bytes);
+      digest.update(bytes);
       fileBytes += bytes.byteLength;
       handlers.onProgress({
         fileId: manifestItem.id,
@@ -169,9 +167,12 @@ export async function sendFilesViaRelay(
     }
 
     assertTransferActive(shouldContinue);
-    const digest = await computeDigestHex(sentChunks);
-    assertTransferActive(shouldContinue);
-    await queue.send({ type: "file-end", fileId: manifestItem.id, bytes: fileBytes, digest });
+    await queue.send({
+      type: "file-end",
+      fileId: manifestItem.id,
+      bytes: fileBytes,
+      digest: digest.digestHex(),
+    });
     completedBytes += fileBytes;
     completedFiles += 1;
   }

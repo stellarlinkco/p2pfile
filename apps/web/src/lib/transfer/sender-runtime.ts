@@ -97,7 +97,8 @@ export async function startSenderRuntime(
     transferring = false;
     queue.reset();
     if (message === "Data channel is not open.") {
-      handlers.onStatus("Waiting for receiver");
+      fallback.markDirectFailed();
+      continueFallback();
       return;
     }
     handlers.onError(message);

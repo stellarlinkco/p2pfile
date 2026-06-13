@@ -21,7 +21,9 @@ class FakeDataChannel {
   readyState: RTCDataChannelState = "connecting";
   bufferedAmount = 0;
   bufferedAmountLowThreshold = 0;
+  failNextBinarySend = false;
   sent: string[] = [];
+  sentBinaryFrames = 0;
   private readonly listeners = new Map<string, Set<() => void>>();
 
   addEventListener(type: string, listener: () => void) {
@@ -35,6 +37,24 @@ class FakeDataChannel {
   }
 
   send(data: unknown) {
+    if (this.readyState !== "open") {
+      throw new DOMException(
+        "Failed to execute 'send' on 'RTCDataChannel': RTCDataChannel.readyState is not 'open'",
+        "InvalidStateError",
+      );
+    }
+    if (data instanceof ArrayBuffer) {
+      if (this.failNextBinarySend) {
+        this.readyState = "closed";
+        this.failNextBinarySend = false;
+        throw new DOMException(
+          "Failed to execute 'send' on 'RTCDataChannel': RTCDataChannel.readyState is not 'open'",
+          "InvalidStateError",
+        );
+      }
+      this.sentBinaryFrames += 1;
+      return;
+    }
     if (typeof data === "string") {
       this.sent.push(data);
     }
@@ -320,6 +340,45 @@ test("direct ICE failure without TURN keeps existing ws relay fallback", async (
     expect(FakePeerConnection.instances.length).toBe(1);
     expect(socket().relayMessageCount()).toBeGreaterThan(0);
 
+    runtime.stop();
+  });
+});
+
+test("data channel close during a zip send falls back to ws relay", async () => {
+  await withSenderHarness(undefined, async ({ errors, socket, peer, settle }) => {
+    const file = {
+      name: "archive-1000g.zip",
+      size: 1000 * 1024 ** 3,
+      type: "application/zip",
+      slice() {
+        return new Blob([new Uint8Array(64 * 1024)], { type: "application/zip" });
+      },
+    } as unknown as File;
+    const manifest = [{ id: "file-1", name: file.name, size: file.size, mimeType: file.type }];
+    const runtime = await startSenderRuntime(
+      "session-large-zip",
+      "sender-token",
+      [file],
+      manifest,
+      {
+        onStatus() {},
+        onMode() {},
+        onProgress() {},
+        onComplete() {},
+        onError(message) {
+          errors.push(message);
+        },
+      },
+    );
+    await settle();
+    const channel = peer(0).channels[0];
+    if (!channel) throw new Error("Expected direct data channel.");
+    channel.failNextBinarySend = true;
+    channel.open();
+    await settle();
+
+    expect(socket().relayMessageCount()).toBeGreaterThan(0);
+    expect(errors).toEqual([]);
     runtime.stop();
   });
 });

@@ -1,5 +1,5 @@
 import type { FileManifestItem } from "@p2pfile/shared";
-import { computeDigestHex } from "./digest";
+import { createSha256Digest, type Sha256Digest } from "./digest";
 import type { ReceiverRuntimeHandlers, TransferProtocolMessage } from "./types";
 
 export type ReceiverProtocolState = {
@@ -9,6 +9,7 @@ export type ReceiverProtocolState = {
   receivedFiles: number;
   currentFile: FileManifestItem | null;
   currentChunks: ArrayBuffer[];
+  currentDigest: Sha256Digest | null;
   currentBytes: number;
   failed: boolean;
 };
@@ -21,11 +22,11 @@ export function buildReceiverState(expectedManifest: FileManifestItem[]): Receiv
     receivedFiles: 0,
     currentFile: null,
     currentChunks: [],
+    currentDigest: null,
     currentBytes: 0,
     failed: false,
   };
 }
-
 function manifestMatchesExpected(expected: FileManifestItem[], received: FileManifestItem[]) {
   if (expected.length !== received.length) {
     return false;
@@ -41,10 +42,10 @@ function failReceiverState(state: ReceiverProtocolState, message: string): never
   state.failed = true;
   state.currentFile = null;
   state.currentChunks = [];
+  state.currentDigest = null;
   state.currentBytes = 0;
   throw new Error(message);
 }
-
 export async function handleProtocolMessage(
   message: TransferProtocolMessage,
   state: ReceiverProtocolState,
@@ -77,6 +78,7 @@ export async function handleProtocolMessage(
     }
     state.currentFile = message.file;
     state.currentChunks = [];
+    state.currentDigest = createSha256Digest();
     state.currentBytes = 0;
     handlers.onStatus(`Receiving ${message.file.name}`);
     return;
@@ -87,6 +89,7 @@ export async function handleProtocolMessage(
       failReceiverState(state, "Sender sent a chunk for the wrong file.");
     }
     state.currentChunks.push(message.bytes);
+    state.currentDigest?.update(message.bytes);
     state.currentBytes += message.bytes.byteLength;
     handlers.onProgress({
       fileId: state.currentFile ? state.currentFile.id : message.fileId,
@@ -111,7 +114,7 @@ export async function handleProtocolMessage(
       failReceiverState(state, "File size verification failed.");
     }
 
-    const digest = await computeDigestHex(state.currentChunks);
+    const digest = state.currentDigest?.digestHex();
     if (digest !== message.digest) {
       failReceiverState(state, "File integrity verification failed.");
     }
@@ -138,6 +141,7 @@ export async function handleProtocolMessage(
     });
     state.currentFile = null;
     state.currentChunks = [];
+    state.currentDigest = null;
     state.currentBytes = 0;
     return;
   }

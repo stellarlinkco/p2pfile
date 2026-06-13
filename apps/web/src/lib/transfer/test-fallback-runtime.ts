@@ -1,5 +1,5 @@
 import type { FileManifestItem } from "@p2pfile/shared";
-import { computeDigestHex } from "./digest";
+import { createSha256Digest } from "./digest";
 import { applyMode, buildReceiverState, handleProtocolMessage } from "./runtime-shared";
 import { reportResumeProgress } from "./sender-runtime-helpers";
 import {
@@ -64,7 +64,7 @@ async function sendTransfer(
       file: manifestItem,
     } satisfies TransferProtocolMessage);
     let fileBytes = 0;
-    const sentChunks: ArrayBuffer[] = [];
+    const digest = createSha256Digest();
     for (let offset = 0; offset < file.size; offset += 64 * 1024) {
       const bytes = await file.slice(offset, offset + 64 * 1024).arrayBuffer();
       if (!shouldContinue()) return;
@@ -73,7 +73,7 @@ async function sendTransfer(
         fileId: manifestItem.id,
         bytes,
       } satisfies TransferProtocolMessage);
-      sentChunks.push(bytes);
+      digest.update(bytes);
       fileBytes += bytes.byteLength;
       handlers.onProgress({
         fileId: manifestItem.id,
@@ -93,7 +93,7 @@ async function sendTransfer(
       type: "file-end",
       fileId: manifestItem.id,
       bytes: fileBytes,
-      digest: await computeDigestHex(sentChunks),
+      digest: digest.digestHex(),
     } satisfies TransferProtocolMessage);
     completedBytes += fileBytes;
     sentCompletedFiles += 1;

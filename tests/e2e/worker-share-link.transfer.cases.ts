@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import {
   createSession,
   forceDirectFail,
+  makeSizedTestFile,
   openReceiver,
   TEST_FILES,
   waitForCompletedSession,
@@ -187,6 +188,51 @@ test("Worker forced direct failure falls back to Relayed Transfer over WebSocket
       senderCompletedVisible: await page
         .getByRole("heading", { level: 3, name: "Completed Session View" })
         .count(),
+    });
+  } finally {
+    await receiver.close();
+  }
+});
+
+test("Worker Relayed Transfer completes a large zip file over WebSockets", async ({ page }) => {
+  test.setTimeout(90_000);
+  const apiRequests: string[] = [];
+  const websocketRequests: string[] = [];
+  observeApiRequests(page, apiRequests);
+  observeWebSockets(page, websocketRequests);
+
+  const files = [makeSizedTestFile("large-worker-relay.zip", 1024 * 1024, "application/zip")];
+  const shareLink = await createSession(page, files, { fallback: false });
+  const receiver = await page.context().newPage();
+  observeApiRequests(receiver, apiRequests);
+  observeWebSockets(receiver, websocketRequests);
+  await forceDirectFail(receiver);
+
+  try {
+    await openReceiver(receiver, shareLink, files, { fallback: false });
+    await receiver.getByTestId("claim-session-button").click();
+
+    await expect(receiver.getByTestId("mode-disclosure")).toContainText(/Relayed Transfer/i, {
+      timeout: 45_000,
+    });
+    await expect(
+      receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
+    ).toBeVisible({ timeout: 60_000 });
+    await expect(
+      page.getByRole("heading", { level: 3, name: "Completed Session View" }),
+    ).toBeVisible({ timeout: 60_000 });
+    await expect(
+      receiver.getByRole("button", { name: "保存 large-worker-relay.zip" }),
+    ).toBeVisible();
+
+    const signalWebSocketRequests = websocketRequests.filter((url) => url.includes("/ws/"));
+    expect(signalWebSocketRequests).toHaveLength(2);
+    await writeEvidence("worker-large-relay-dom-trace.json", {
+      assertionId: "VAL-CF-006-LARGE",
+      shareLink,
+      apiRequests,
+      websocketRequests: signalWebSocketRequests,
+      receiverModeDisclosure: await receiver.getByTestId("mode-disclosure").textContent(),
     });
   } finally {
     await receiver.close();

@@ -19,6 +19,30 @@ export const TEST_FILES: TestFile[] = [
   },
 ];
 
+export function makeSizedTestFile(
+  name: string,
+  size: number,
+  mimeType = "application/octet-stream",
+): TestFile {
+  const buffer = Buffer.allocUnsafe(size);
+  for (let index = 0; index < size; index += 1) {
+    buffer[index] = (index * 17 + size) % 251;
+  }
+  return { name, mimeType, buffer };
+}
+
+function formatExpectedBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 100 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
+}
+
 export async function enableTransferFallback(page: Page) {
   await page.addInitScript(() => {
     Object.defineProperty(window, "__P2PFILE_TEST_FALLBACK__", {
@@ -165,7 +189,7 @@ export async function openReceiver(
   await expect(manifest).toBeVisible();
   for (const file of files) {
     await expect(manifest).toContainText(file.name);
-    await expect(manifest).toContainText(String(file.buffer.byteLength));
+    await expect(manifest).toContainText(formatExpectedBytes(file.buffer.byteLength));
   }
   await expect(page.getByText(/alpha file from playwright|"beta"/i)).toHaveCount(0);
   await expect(page.getByTestId("claim-session-button")).toBeVisible();

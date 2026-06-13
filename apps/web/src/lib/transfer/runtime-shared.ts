@@ -86,7 +86,26 @@ export function awaitIceComplete(pc: RTCPeerConnection) {
   return promise;
 }
 
+function dataChannelClosedError() {
+  return new Error("Data channel is not open.");
+}
+
+function isNativeDataChannelClosedError(error: unknown) {
+  return (
+    error instanceof DOMException &&
+    error.name === "InvalidStateError" &&
+    error.message.includes("RTCDataChannel.readyState")
+  );
+}
+
+export function assertDataChannelOpen(channel: RTCDataChannel) {
+  if (channel.readyState !== "open") {
+    throw dataChannelClosedError();
+  }
+}
+
 export async function awaitBufferedAmount(channel: RTCDataChannel) {
+  assertDataChannelOpen(channel);
   if (channel.bufferedAmount < CHUNK_BYTES * 2) {
     return;
   }
@@ -98,13 +117,14 @@ export async function awaitBufferedAmount(channel: RTCDataChannel) {
   };
   const onClose = () => {
     channel.removeEventListener("bufferedamountlow", onBufferedAmountLow);
-    reject(new Error("Data channel closed while waiting for buffer drain."));
+    reject(dataChannelClosedError());
   };
 
   channel.bufferedAmountLowThreshold = CHUNK_BYTES;
   channel.addEventListener("bufferedamountlow", onBufferedAmountLow, { once: true });
   channel.addEventListener("close", onClose, { once: true });
   await promise;
+  assertDataChannelOpen(channel);
 }
 
 export function sendSignal(ws: WebSocket, message: BrowserSignalMessage) {
@@ -113,11 +133,27 @@ export function sendSignal(ws: WebSocket, message: BrowserSignalMessage) {
   }
 }
 
+export function sendDataChannelPayload(channel: RTCDataChannel, data: string | ArrayBuffer) {
+  assertDataChannelOpen(channel);
+  try {
+    if (typeof data === "string") {
+      channel.send(data);
+    } else {
+      channel.send(data);
+    }
+  } catch (error) {
+    if (isNativeDataChannelClosedError(error)) {
+      throw dataChannelClosedError();
+    }
+    throw error;
+  }
+}
+
 export function sendProtocolMessage(
   channel: RTCDataChannel,
   message: Exclude<TransferProtocolMessage, { type: "chunk" }>,
 ) {
-  channel.send(JSON.stringify(message));
+  sendDataChannelPayload(channel, JSON.stringify(message));
 }
 
 export function parseSignalMessage(raw: MessageEvent<string>) {

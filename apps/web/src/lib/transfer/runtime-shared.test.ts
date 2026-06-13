@@ -298,6 +298,7 @@ test("awaitBufferedAmount rejects when channel closes before draining", async ()
   const channel = {
     bufferedAmount: 128 * 1024,
     bufferedAmountLowThreshold: 0,
+    readyState: "open",
     addEventListener(type: string, listener: () => void) {
       const current = listeners.get(type) ?? new Set();
       current.add(listener);
@@ -313,5 +314,5 @@ test("awaitBufferedAmount rejects when channel closes before draining", async ()
     listener();
   }
 
-  await expect(pending).rejects.toThrow("Data channel closed while waiting for buffer drain.");
+  await expect(pending).rejects.toThrow("Data channel is not open.");
 });
