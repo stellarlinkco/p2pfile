@@ -12,6 +12,7 @@ import { currentTime } from "./clock";
 const ACCESS_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 export const COMPLETED_SESSION_VIEW_TTL_MS = 2 * 60 * 1000;
+export const SENDER_RECONNECT_GRACE_MS = 30 * 1000;
 export const OPEN_SESSION_TTL_MS = 10 * 60 * 1000;
 export const SESSION_STORAGE_KEY = "session";
 export const DIRECTORY_OBJECT_NAME = "session-directory";
@@ -73,6 +74,7 @@ export function summarize(manifest: FileManifestItem[]) {
 export function toPublicSession(session: SessionRecord): SessionPublicView {
   const isOpen = session.state === "waiting" || session.state === "viewing";
   const isCompletedView = session.state === "completed-view";
+  const isReconnectGrace = session.state === "reconnecting";
   return SessionPublicViewSchema.parse({
     sessionId: session.id,
     state: session.state,
@@ -83,10 +85,11 @@ export function toPublicSession(session: SessionRecord): SessionPublicView {
     claimed:
       session.state === "claimed" ||
       session.state === "connecting" ||
-      session.state === "transferring",
+      session.state === "transferring" ||
+      isReconnectGrace,
     completed: isCompletedView,
     ended: session.state === "ended",
-    expiresAt: isOpen || isCompletedView ? session.openExpiresAt : null,
+    expiresAt: isOpen || isCompletedView || isReconnectGrace ? session.openExpiresAt : null,
     retriesRemaining: session.retriesRemaining,
     failureReason: session.failureReason,
   });
@@ -122,11 +125,16 @@ export function isExpired(session: SessionRecord, at = currentTime.now()) {
   );
 }
 
+export function isReconnectGraceExpired(session: SessionRecord, at = currentTime.now()) {
+  return session.state === "reconnecting" && session.openExpiresAt <= at;
+}
+
 export function isActiveSession(session: SessionRecord) {
   return (
     session.state === "claimed" ||
     session.state === "connecting" ||
-    session.state === "transferring"
+    session.state === "transferring" ||
+    session.state === "reconnecting"
   );
 }
 

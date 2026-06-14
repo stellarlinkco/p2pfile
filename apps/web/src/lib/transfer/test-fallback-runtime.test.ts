@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import type { FileManifestItem } from "@p2pfile/shared";
+import {
+  type FileManifestItem,
+  MANIFEST_CHUNK_BYTES,
+  resumeProgressFromManifest,
+} from "@p2pfile/shared";
 import {
   startReceiverTestFallbackRuntime,
   startSenderTestFallbackRuntime,
@@ -53,7 +57,13 @@ test("fallback sender file-end carries the file content digest", async () => {
       },
     }),
   );
-  tap.postMessage({ type: "receiver-ready", payload: { completedFiles: 0 } });
+  tap.postMessage({
+    type: "receiver-ready",
+    payload: {
+      completedFiles: 0,
+      progress: resumeProgressFromManifest([{ id: "file-1", name: "alpha.txt", size: 5 }]),
+    },
+  });
 
   try {
     const message = await fileEnd.promise;
@@ -104,7 +114,7 @@ test("receiver fallback restores progress from already received files", async ()
 
   runtime.stop();
 
-  expect(progress).toContainEqual({
+  expect(progress.at(-1)).toMatchObject({
     fileId: "file-2",
     fileName: "beta.txt",
     fileBytes: 0,
@@ -114,6 +124,92 @@ test("receiver fallback restores progress from already received files", async ()
     completedFiles: 1,
     totalFiles: 2,
   });
+});
+
+test("receiver fallback seeds state and UI progress from advertised resume progress", async () => {
+  const committed = new Map([
+    ["file-1", 5],
+    ["file-2", MANIFEST_CHUNK_BYTES],
+  ]);
+  const progress: TransferProgress[] = [];
+
+  const runtime = await startReceiverTestFallbackRuntime(
+    `session-${crypto.randomUUID()}`,
+    "receiver-token",
+    [
+      { id: "file-1", name: "alpha.txt", size: 5 },
+      { id: "file-2", name: "beta.txt", size: MANIFEST_CHUNK_BYTES * 2 },
+    ],
+    {
+      onComplete() {},
+      onEnded() {},
+      onError() {},
+      onFileReceived() {},
+      onMode() {},
+      onProgress(nextProgress) {
+        progress.push(nextProgress);
+      },
+      onStatus() {},
+    },
+    [],
+    committed,
+  );
+
+  runtime.stop();
+
+  expect(progress.at(-1)).toMatchObject({
+    fileId: "file-2",
+    completedBytes: MANIFEST_CHUNK_BYTES + 5,
+    completedFiles: 1,
+    files: [
+      { fileId: "file-1", fileBytes: 5, state: "completed" },
+      { fileId: "file-2", fileBytes: MANIFEST_CHUNK_BYTES, state: "reconnecting" },
+    ],
+  });
+});
+
+test("sender fallback resumes from advertised active-file offset", async () => {
+  const sessionId = `session-${crypto.randomUUID()}`;
+  const manifest: FileManifestItem[] = [
+    { id: "file-1", name: "alpha.txt", size: MANIFEST_CHUNK_BYTES * 2 },
+  ];
+  const tap = new BroadcastChannel(`p2pfile:test:${sessionId}`);
+  const fileStart = Promise.withResolvers<TransferProtocolMessage>();
+  tap.onmessage = (event) => {
+    const message = event.data as TransferProtocolMessage;
+    if (message.type === "file-start") {
+      fileStart.resolve(message);
+    }
+  };
+  const sender = await startSenderTestFallbackRuntime(
+    sessionId,
+    "sender-token",
+    [new File([new Uint8Array(MANIFEST_CHUNK_BYTES * 2)], "alpha.txt", { type: "text/plain" })],
+    manifest,
+    senderHandlersWith({
+      onError(message) {
+        fileStart.reject(new Error(message));
+      },
+    }),
+  );
+  tap.postMessage({
+    type: "receiver-ready",
+    payload: {
+      completedFiles: 0,
+      progress: resumeProgressFromManifest(manifest, new Map([["file-1", MANIFEST_CHUNK_BYTES]])),
+    },
+  });
+
+  try {
+    await expect(fileStart.promise).resolves.toMatchObject({
+      type: "file-start",
+      file: manifest[0],
+      offset: MANIFEST_CHUNK_BYTES,
+    });
+  } finally {
+    sender.stop();
+    tap.close();
+  }
 });
 
 test("sender fallback resumes from the receiver completed-file offset", async () => {

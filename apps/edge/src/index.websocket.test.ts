@@ -4,6 +4,7 @@ import {
   ClaimSessionResponseSchema,
   CreateSessionResponseSchema,
   ReleaseSessionResponseSchema,
+  resumeProgressFromManifest,
   SessionMutationResponseSchema,
 } from "@p2pfile/shared";
 import { resetEdgeSessionsForTests, type SessionDurableObject, setEdgeNowForTests } from "./index";
@@ -68,6 +69,7 @@ test("Completed Session View expires after its short-lived Durable Object alarm 
   expect((await expiredCode.json()) as unknown).toEqual({ message: "session not found" });
 });
 test("SessionObject WebSockets forward validated Direct Transfer signaling only to the peer", async () => {
+  resetEdgeSessionsForTests();
   const env = createEnv(createDurableObjects());
   const pairs = installFakeWebSocketPair();
   const { body: created } = await createSession(env);
@@ -92,18 +94,30 @@ test("SessionObject WebSockets forward validated Direct Transfer signaling only 
 
   const sender = senderPair.client;
   const receiver = receiverPair.client;
-  const ready = { type: "receiver-ready", payload: { completedFiles: 0 } };
+  const ready = {
+    type: "receiver-ready",
+    payload: { completedFiles: 0, progress: resumeProgressFromManifest(manifest) },
+  };
   receiver.send(JSON.stringify(ready));
-  expect(sender.received).toEqual([JSON.stringify(ready)]);
+  expect(sender.received.map((message) => JSON.parse(message))).toEqual([ready]);
   expect(receiver.received).toEqual([]);
 
   const offer = { type: "offer", payload: { type: "offer", sdp: "v=0" } };
   sender.send(JSON.stringify(offer));
   expect(receiver.received).toEqual([JSON.stringify(offer)]);
 
-  sender.send(JSON.stringify({ type: "receiver-ready", payload: { completedFiles: 1 } }));
+  sender.send(
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: { completedFiles: 1, progress: resumeProgressFromManifest(manifest) },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
   expect(sender.closed).toEqual({ code: 1003, reason: "invalid signal message" });
-  expect(receiver.received).toEqual([JSON.stringify(offer)]);
+  expect(receiver.received).toEqual([
+    JSON.stringify(offer),
+    JSON.stringify({ type: "sender-reconnecting", payload: { reason: "sender-disconnected" } }),
+  ]);
 });
 
 test("SessionObject relays transfer frames in-flight without writing chunks to storage", async () => {
@@ -140,7 +154,10 @@ test("SessionObject relays transfer frames in-flight without writing chunks to s
       message: {
         type: "chunk",
         fileId: manifest[0]?.id ?? "local-1",
+        chunkIndex: 0,
+        offset: 0,
         bytesBase64: relayChunk,
+        chunkDigest: "0".repeat(64),
       },
     },
   };
@@ -163,6 +180,62 @@ test("SessionObject relays transfer frames in-flight without writing chunks to s
   expect(durableWrites).not.toContain("relay-message");
   expect(durableWrites).not.toContain("relay-ack");
   expect(durableWrites).not.toContain("relay-ready");
+});
+
+test("SessionObject forwards receiver relay chunk-commit separately from relay delivery ack", async () => {
+  const storageMutations: StorageMutation[] = [];
+  const env = createEnv(createDurableObjectsWithStorageTrace(storageMutations));
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+  const claim = await claimReceiver(env, session.sessionId);
+
+  const senderResponse = await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+    env,
+  );
+  const receiverResponse = await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+    env,
+  );
+
+  expect(senderResponse.status).toBe(101);
+  expect(receiverResponse.status).toBe(101);
+  const senderPair = pairs[0];
+  const receiverPair = pairs[1];
+  if (!senderPair || !receiverPair) throw new Error("expected sender and receiver sockets");
+
+  const sender = senderPair.client;
+  const receiver = receiverPair.client;
+  const relayAck = { type: "relay-ack", payload: { sequence: 4 } };
+  const relayCommit = {
+    type: "relay-message",
+    payload: {
+      sequence: 11,
+      message: {
+        type: "chunk-commit",
+        fileId: manifest[0]?.id ?? "local-1",
+        chunkIndex: 0,
+        committedBytes: 64 * 1024,
+      },
+    },
+  };
+
+  receiver.send(JSON.stringify(relayAck));
+  receiver.send(JSON.stringify(relayCommit));
+  expect(sender.received.map((message) => JSON.parse(message))).toEqual([relayAck, relayCommit]);
+
+  sender.send(JSON.stringify({ type: "relay-ack", payload: { sequence: 11 } }));
+  expect(receiver.received.map((message) => JSON.parse(message))).toEqual([
+    { type: "relay-ack", payload: { sequence: 11 } },
+  ]);
+  expect(sender.closed).toBeNull();
+  expect(receiver.closed).toBeNull();
+
+  const durableWrites = JSON.stringify(storageMutations);
+  expect(durableWrites).not.toContain("chunk-commit");
+  expect(durableWrites).not.toContain("bytesBase64");
+  expect(durableWrites).not.toContain("committedBytes");
 });
 
 test("release preserves sender WebSocket for later receiver signaling", async () => {
@@ -232,7 +305,10 @@ test("release preserves sender WebSocket for later receiver signaling", async ()
       message: {
         type: "chunk",
         fileId: manifest[0]?.id ?? "local-1",
+        chunkIndex: 0,
+        offset: 0,
         bytesBase64: "YQ==",
+        chunkDigest: "0".repeat(64),
       },
     },
   };

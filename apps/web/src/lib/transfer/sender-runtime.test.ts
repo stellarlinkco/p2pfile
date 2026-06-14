@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
+import { MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
+import { RelayMessageQueue } from "./relay-queue";
 import { shouldReuseDirectAttempt, startSenderRuntime } from "./sender-runtime";
+import { attachSenderSignalHandler } from "./sender-signal-handler";
 import type { BrowserSignalMessage, SenderRuntimeHandlers } from "./types";
 
 test("sender retry does not reuse a closed data channel", () => {
@@ -14,6 +17,51 @@ test("sender retry can reuse a connecting data channel", () => {
   const connectingChannel = { readyState: "connecting" } as RTCDataChannel;
 
   expect(shouldReuseDirectAttempt(peer, connectingChannel)).toBe(true);
+});
+
+test("sender treats inbound relay chunk-commit as receiver commit and sends only transport relay ack", async () => {
+  const ws = new FakeWebSocket("ws://sender");
+  const queue = new RelayMessageQueue(() => undefined);
+  const commit = queue.awaitCommit("file-1", 0, MANIFEST_CHUNK_BYTES);
+
+  try {
+    attachSenderSignalHandler({
+      ws: ws as unknown as WebSocket,
+      queue,
+      handlers: {
+        onStatus() {},
+        onMode() {},
+        onProgress() {},
+        onComplete() {},
+        onError() {},
+      },
+      isStopped: () => false,
+      getPeerConnection: () => null,
+      handleReceiverReady() {},
+      markDirectFailed() {},
+      continueFallback() {},
+      stopRelayMode() {},
+      markCompleted() {},
+    });
+
+    ws.receive({
+      type: "relay-message",
+      payload: {
+        sequence: 9,
+        message: {
+          type: "chunk-commit",
+          fileId: "file-1",
+          chunkIndex: 0,
+          committedBytes: MANIFEST_CHUNK_BYTES,
+        },
+      },
+    });
+
+    await expect(commit).resolves.toBe(MANIFEST_CHUNK_BYTES);
+    expect(ws.sent).toEqual([{ type: "relay-ack", payload: { sequence: 9 } }]);
+  } finally {
+    queue.stop();
+  }
 });
 
 class FakeDataChannel {
@@ -56,6 +104,17 @@ class FakeDataChannel {
       return;
     }
     if (typeof data === "string") {
+      if (
+        this.failNextBinarySend &&
+        (data.includes('"type":"chunk"') || data.includes('"bytesBase64"'))
+      ) {
+        this.readyState = "closed";
+        this.failNextBinarySend = false;
+        throw new DOMException(
+          "Failed to execute 'send' on 'RTCDataChannel': RTCDataChannel.readyState is not 'open'",
+          "InvalidStateError",
+        );
+      }
       this.sent.push(data);
     }
   }
@@ -167,6 +226,9 @@ class FakeWebSocket {
 
   close() {
     this.readyState = FakeWebSocket.CLOSED;
+    for (const listener of this.listeners.get("close") ?? []) {
+      listener({} as MessageEvent<string>);
+    }
   }
 
   receive(message: BrowserSignalMessage) {
@@ -344,6 +406,31 @@ test("direct ICE failure without TURN keeps existing ws relay fallback", async (
   });
 });
 
+test("accidental signal socket close reattaches sender with the same token", async () => {
+  await withSenderHarness(undefined, async ({ settle }) => {
+    const runtime = await startSenderRuntime("session-reconnect", "sender-token", [], [], {
+      onStatus() {},
+      onMode() {},
+      onProgress() {},
+      onComplete() {},
+      onError() {},
+    });
+    await settle();
+
+    const firstSocket = FakeWebSocket.instances[0];
+    if (!firstSocket) throw new Error("expected first signal socket");
+    firstSocket.close();
+    await settle();
+
+    const secondSocket = FakeWebSocket.instances[1];
+    if (!secondSocket) throw new Error("expected reattached signal socket");
+    expect(secondSocket.url).toContain("/ws/session-reconnect/sender/sender-token");
+    expect(FakePeerConnection.instances.length).toBeGreaterThanOrEqual(2);
+
+    runtime.stop();
+  });
+});
+
 test("data channel close during a zip send falls back to ws relay", async () => {
   await withSenderHarness(undefined, async ({ errors, socket, peer, settle }) => {
     const file = {
@@ -375,10 +462,123 @@ test("data channel close during a zip send falls back to ws relay", async () => 
     if (!channel) throw new Error("Expected direct data channel.");
     channel.failNextBinarySend = true;
     channel.open();
+    await Bun.sleep(20);
     await settle();
 
     expect(socket().relayMessageCount()).toBeGreaterThan(0);
     expect(errors).toEqual([]);
     runtime.stop();
   });
+});
+test("receiver restart resets an in-flight relay transfer when progress is unchanged", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { __P2PFILE_TEST_FALLBACK__: true, location: { origin: "http://localhost" } },
+  });
+
+  try {
+    await withSenderHarness(undefined, async ({ errors, socket, settle }) => {
+      const file = new File([new Uint8Array(MANIFEST_CHUNK_BYTES * 2)], "large.zip", {
+        type: "application/zip",
+      });
+      const manifest = [{ id: "file-1", name: file.name, size: file.size, mimeType: file.type }];
+      const manifestFile = manifest[0];
+      if (!manifestFile) throw new Error("Expected manifest item.");
+      const runtime = await startSenderRuntime(
+        "session-relay-restart",
+        "sender-token",
+        [file],
+        manifest,
+        {
+          onStatus() {},
+          onMode() {},
+          onProgress() {},
+          onComplete() {},
+          onError(message) {
+            errors.push(message);
+          },
+        },
+      );
+      await settle();
+
+      const progress = {
+        manifestHash: `${manifestFile.id}:${manifestFile.name}:${manifestFile.size}`,
+        files: [
+          {
+            fileId: manifestFile.id,
+            size: manifestFile.size,
+            chunkSize: MANIFEST_CHUNK_BYTES,
+            committedBytes: MANIFEST_CHUNK_BYTES,
+            completed: false,
+          },
+        ],
+      };
+      const acknowledged = new Set<BrowserSignalMessage>();
+      const acknowledgeRelayMessages = async () => {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          for (const message of socket().sent) {
+            if (message.type !== "relay-message" || acknowledged.has(message)) continue;
+            acknowledged.add(message);
+            socket().receive({
+              type: "relay-ack",
+              payload: { sequence: message.payload.sequence },
+            });
+          }
+          await settle();
+        }
+      };
+      const relayFileStarts = () =>
+        socket().sent.flatMap((message) =>
+          message.type === "relay-message" && message.payload.message.type === "file-start"
+            ? [message.payload.message.offset]
+            : [],
+        );
+
+      socket().receive({
+        type: "receiver-ready",
+        payload: { progress, receiverInstanceId: "receiver-a" },
+      });
+      await acknowledgeRelayMessages();
+      expect(relayFileStarts()).toEqual([MANIFEST_CHUNK_BYTES]);
+
+      socket().receive({
+        type: "receiver-ready",
+        payload: { progress, receiverInstanceId: "receiver-b" },
+      });
+      await acknowledgeRelayMessages();
+
+      const lastChunk = socket()
+        .sent.filter(
+          (message): message is BrowserSignalMessage & { type: "relay-message" } =>
+            message.type === "relay-message" && message.payload.message.type === "chunk",
+        )
+        .at(-1);
+      if (lastChunk?.payload.message.type === "chunk") {
+        socket().receive({
+          type: "relay-message",
+          payload: {
+            sequence: 1000,
+            message: {
+              type: "chunk-commit",
+              fileId: lastChunk.payload.message.fileId,
+              chunkIndex: lastChunk.payload.message.chunkIndex,
+              committedBytes: MANIFEST_CHUNK_BYTES * 2,
+            },
+          },
+        });
+        await settle();
+      }
+
+      expect(relayFileStarts()).toEqual([MANIFEST_CHUNK_BYTES, MANIFEST_CHUNK_BYTES]);
+      expect(errors).toEqual([]);
+      runtime.stop();
+    });
+  } finally {
+    if (previousWindow) {
+      Object.defineProperty(globalThis, "window", previousWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
 });

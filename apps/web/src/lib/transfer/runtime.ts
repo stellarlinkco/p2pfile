@@ -51,6 +51,7 @@ export function startReceiverRuntime(
   expectedManifest: FileManifestItem[],
   handlers: ReceiverRuntimeHandlers,
   receivedFiles: ReceivedFile[] = [],
+  committedBytesByFileId: ReadonlyMap<string, number> = new Map(),
 ): Promise<ReceiverRuntime> {
   if (preferRelayInTests()) {
     return startReceiverTestFallbackRuntime(
@@ -59,6 +60,7 @@ export function startReceiverRuntime(
       expectedManifest,
       handlers,
       receivedFiles,
+      committedBytesByFileId,
     );
   }
 
@@ -68,6 +70,7 @@ export function startReceiverRuntime(
     expectedManifest,
     handlers,
     receivedFiles,
+    committedBytesByFileId,
   );
 }
 

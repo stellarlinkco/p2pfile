@@ -1,11 +1,21 @@
-import type { FileManifestItem } from "@p2pfile/shared";
-import { createSha256Digest } from "./digest";
+import {
+  type FileManifestItem,
+  MANIFEST_CHUNK_BYTES,
+  manifestHash,
+  type ResumeProgress,
+} from "@p2pfile/shared";
 import type { RelayMessageQueue } from "./relay-queue";
-import { awaitBufferedAmount, sendDataChannelPayload, sendProtocolMessage } from "./runtime-shared";
-import type { SenderRuntimeHandlers, TransferProgress } from "./types";
+import { awaitBufferedAmount, parseProtocolMessage, sendProtocolMessage } from "./runtime-shared";
+import {
+  buildTransferProgress,
+  sendScheduledTransfer,
+  type TransferSchedulerOptions,
+} from "./transfer-scheduler";
+import type { SenderRuntimeHandlers } from "./types";
 
 export type TransferPlan = {
-  manifest: Array<{ id: string; name: string; size: number }>;
+  manifest: FileManifestItem[];
+  manifestHash: string;
   totalBytes: number;
 };
 
@@ -24,35 +34,167 @@ export function buildTransferPlan(
   const manifest =
     frozenManifest?.map((file) => ({ id: file.id, name: file.name, size: file.size })) ??
     manifestFromFiles(files);
-  return { manifest, totalBytes: manifest.reduce((sum, file) => sum + file.size, 0) };
+  return {
+    manifest,
+    manifestHash: manifestHash(manifest),
+    totalBytes: manifest.reduce((sum, file) => sum + file.size, 0),
+  };
 }
 
-function completedBytesFor(plan: TransferPlan, completedFiles: number) {
-  return plan.manifest.slice(0, completedFiles).reduce((sum, file) => sum + file.size, 0);
+function pauseAfterCompletedFiles() {
+  const value = (globalThis as { __P2PFILE_TEST_PAUSE_AFTER_FILES__?: number })
+    .__P2PFILE_TEST_PAUSE_AFTER_FILES__;
+  return typeof value === "number" ? value : null;
+}
+
+function recordTransferTestEvent(event: Record<string, unknown>) {
+  const target = globalThis as {
+    __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
+  };
+  target.__P2PFILE_TEST_TRANSFER_EVENTS__?.push(event);
+}
+
+export function initialResumeProgress(plan: TransferPlan): ResumeProgress {
+  return {
+    manifestHash: plan.manifestHash,
+    files: plan.manifest.map((file) => ({
+      fileId: file.id,
+      size: file.size,
+      chunkSize: MANIFEST_CHUNK_BYTES,
+      committedBytes: 0,
+      completed: false,
+    })),
+  };
+}
+
+function progressFromCompletedFiles(plan: TransferPlan, completedFiles: number) {
+  return {
+    manifestHash: plan.manifestHash,
+    files: plan.manifest.map((file, index) => ({
+      fileId: file.id,
+      size: file.size,
+      chunkSize: MANIFEST_CHUNK_BYTES,
+      committedBytes: index < completedFiles ? file.size : 0,
+      completed: index < completedFiles,
+    })),
+  } satisfies ResumeProgress;
+}
+
+function coerceResumeProgress(plan: TransferPlan, progress: ResumeProgress | number) {
+  return typeof progress === "number"
+    ? progressFromCompletedFiles(plan, Math.max(0, Math.min(progress, plan.manifest.length)))
+    : progress;
+}
+
+export function completedFilesFromProgress(progress: ResumeProgress) {
+  return progress.files.filter((file) => file.completed).length;
+}
+
+export function normalizeResumeProgress(plan: TransferPlan, progress: ResumeProgress) {
+  if (
+    progress.manifestHash !== plan.manifestHash ||
+    progress.files.length !== plan.manifest.length
+  ) {
+    throw new Error("Receiver ResumeProgress manifest mismatch.");
+  }
+  return {
+    manifestHash: progress.manifestHash,
+    files: progress.files.map((file, index) => {
+      const expected = plan.manifest[index];
+      if (!expected || file.fileId !== expected.id || file.size !== expected.size) {
+        throw new Error("Receiver ResumeProgress manifest mismatch.");
+      }
+      if (file.chunkSize !== MANIFEST_CHUNK_BYTES) {
+        throw new Error("Receiver ResumeProgress chunk size mismatch.");
+      }
+      if (file.committedBytes > file.size) {
+        throw new Error("Receiver ResumeProgress committed bytes exceed file size.");
+      }
+      if (file.committedBytes !== file.size && file.committedBytes % file.chunkSize !== 0) {
+        throw new Error("Receiver ResumeProgress committed bytes are not chunk aligned.");
+      }
+      if (file.completed && file.committedBytes !== file.size) {
+        throw new Error("Receiver ResumeProgress completed flag does not match committed bytes.");
+      }
+      return { ...file };
+    }),
+  } satisfies ResumeProgress;
+}
+
+export function mergeResumeProgress(
+  plan: TransferPlan,
+  currentProgress: ResumeProgress,
+  nextProgress: ResumeProgress,
+  options: { authoritativeReset?: boolean } = {},
+) {
+  const current = normalizeResumeProgress(plan, currentProgress);
+  const next = normalizeResumeProgress(plan, nextProgress);
+  if (options.authoritativeReset) return next;
+  return {
+    manifestHash: plan.manifestHash,
+    files: current.files.map((currentFile, index) => {
+      const nextFile = next.files[index];
+      if (!nextFile) return currentFile;
+      const committedBytes = Math.max(currentFile.committedBytes, nextFile.committedBytes);
+      return {
+        fileId: currentFile.fileId,
+        size: currentFile.size,
+        chunkSize: currentFile.chunkSize,
+        committedBytes,
+        completed:
+          committedBytes === currentFile.size &&
+          (currentFile.completed || nextFile.completed || currentFile.size > 0),
+      };
+    }),
+  } satisfies ResumeProgress;
 }
 
 export function reportResumeProgress(
   plan: TransferPlan,
-  completedFiles: number,
+  progress: ResumeProgress,
   handlers: SenderRuntimeHandlers,
 ) {
-  const nextFile = plan.manifest[completedFiles] ?? null;
-  handlers.onProgress({
-    fileId: nextFile?.id ?? null,
-    fileName: nextFile?.name ?? null,
-    fileBytes: 0,
-    fileTotalBytes: nextFile?.size ?? 0,
-    completedBytes: completedBytesFor(plan, completedFiles),
-    totalBytes: plan.totalBytes,
-    completedFiles,
-    totalFiles: plan.manifest.length,
-  } satisfies TransferProgress);
+  handlers.onProgress(buildTransferProgress(plan, progress, null));
 }
 
 export function assertTransferActive(shouldContinue: () => boolean) {
-  if (!shouldContinue()) {
-    throw new Error("Transfer restarted.");
+  if (!shouldContinue()) throw new Error("Transfer restarted.");
+}
+
+function awaitCommit(
+  pendingCommits: Map<string, PromiseWithResolvers<number>>,
+  channel: RTCDataChannel,
+  fileId: string,
+  chunkIndex: number,
+  expectedCommittedBytes: number,
+) {
+  if (typeof channel.addEventListener !== "function") {
+    return Promise.resolve(expectedCommittedBytes);
   }
+  const key = `${fileId}:${chunkIndex}`;
+  const deferred = Promise.withResolvers<number>();
+  pendingCommits.set(key, deferred);
+  const onClose = () => deferred.reject(new Error("Data channel is not open."));
+  channel.addEventListener("close", onClose, { once: true });
+  return deferred.promise.finally(() => {
+    channel.removeEventListener("close", onClose);
+    pendingCommits.delete(key);
+  });
+}
+
+function attachCommitListener(
+  channel: RTCDataChannel,
+  pendingCommits: Map<string, PromiseWithResolvers<number>>,
+) {
+  if (typeof channel.addEventListener !== "function") return () => undefined;
+  const listener = (event: MessageEvent) => {
+    if (typeof event.data !== "string") return;
+    const message = parseProtocolMessage(event.data);
+    if (message?.type !== "chunk-commit") return;
+    pendingCommits.get(`${message.fileId}:${message.chunkIndex}`)?.resolve(message.committedBytes);
+  };
+  channel.addEventListener("message", listener);
+  return () => channel.removeEventListener("message", listener);
 }
 
 export async function sendFiles(
@@ -60,65 +202,66 @@ export async function sendFiles(
   files: File[],
   plan: TransferPlan,
   handlers: SenderRuntimeHandlers,
-  startIndex: number,
+  progress: ResumeProgress | number,
   shouldContinue: () => boolean,
+  onResumeProgress?: (progress: ResumeProgress) => void,
+  scheduler?: Partial<TransferSchedulerOptions>,
 ) {
-  let completedBytes = completedBytesFor(plan, startIndex);
-  let completedFiles = startIndex;
+  const resume = normalizeResumeProgress(plan, coerceResumeProgress(plan, progress));
+  const pauseTarget = pauseAfterCompletedFiles();
+  const schedulerOptions = pauseTarget === null ? scheduler : { ...scheduler, maxActiveFiles: 1 };
+  const pendingCommits = new Map<string, PromiseWithResolvers<number>>();
+  const detachCommitListener = attachCommitListener(channel, pendingCommits);
 
   handlers.onStatus("Transferring");
-  sendProtocolMessage(channel, {
-    type: "manifest",
-    files: plan.manifest,
-    totalBytes: plan.totalBytes,
-  });
-
-  for (let index = startIndex; index < files.length; index += 1) {
-    assertTransferActive(shouldContinue);
-    const file = files[index];
-    const manifestItem = plan.manifest[index];
-    if (!file || !manifestItem) {
-      continue;
-    }
-
-    let fileBytes = 0;
-    const digest = createSha256Digest();
-    sendProtocolMessage(channel, { type: "file-start", file: manifestItem });
-
-    for (let offset = 0; offset < file.size; offset += 64 * 1024) {
-      assertTransferActive(shouldContinue);
-      await awaitBufferedAmount(channel);
-      assertTransferActive(shouldContinue);
-      const bytes = await file.slice(offset, offset + 64 * 1024).arrayBuffer();
-      assertTransferActive(shouldContinue);
-      sendDataChannelPayload(channel, bytes);
-      digest.update(bytes);
-      fileBytes += bytes.byteLength;
-      handlers.onProgress({
-        fileId: manifestItem.id,
-        fileName: manifestItem.name,
-        fileBytes,
-        fileTotalBytes: manifestItem.size,
-        completedBytes: completedBytes + fileBytes,
-        totalBytes: plan.totalBytes,
-        completedFiles,
-        totalFiles: files.length,
-      } satisfies TransferProgress);
-    }
-
-    assertTransferActive(shouldContinue);
-    sendProtocolMessage(channel, {
-      type: "file-end",
-      fileId: manifestItem.id,
-      bytes: fileBytes,
-      digest: digest.digestHex(),
+  try {
+    await sendScheduledTransfer(files, {
+      handlers,
+      mode: "direct",
+      onResumeProgress,
+      plan,
+      progress: resume,
+      recordEvent: recordTransferTestEvent,
+      scheduler: schedulerOptions,
+      shouldContinue,
+      shouldPause: (progress) => pauseTarget === completedFilesFromProgress(progress),
+      transport: {
+        beforeChunk: () => awaitBufferedAmount(channel),
+        complete: (totalBytes) => sendProtocolMessage(channel, { type: "complete", totalBytes }),
+        endFile: (file, bytes, digest) =>
+          sendProtocolMessage(channel, { type: "file-end", fileId: file.id, bytes, digest }),
+        sendChunk(chunk) {
+          const commit = awaitCommit(
+            pendingCommits,
+            channel,
+            chunk.file.id,
+            chunk.chunkIndex,
+            chunk.offset + chunk.bytes.byteLength,
+          );
+          sendProtocolMessage(channel, {
+            type: "chunk",
+            fileId: chunk.file.id,
+            chunkIndex: chunk.chunkIndex,
+            offset: chunk.offset,
+            bytes: chunk.bytes,
+            chunkDigest: chunk.chunkDigest,
+          });
+          return commit;
+        },
+        sendManifest: (nextPlan) =>
+          sendProtocolMessage(channel, {
+            type: "manifest",
+            files: nextPlan.manifest,
+            totalBytes: nextPlan.totalBytes,
+            manifestHash: nextPlan.manifestHash,
+          }),
+        startFile: (file, offset) =>
+          sendProtocolMessage(channel, { type: "file-start", file, offset }),
+      },
     });
-    completedBytes += fileBytes;
-    completedFiles += 1;
+  } finally {
+    detachCommitListener();
   }
-
-  assertTransferActive(shouldContinue);
-  sendProtocolMessage(channel, { type: "complete", totalBytes: plan.totalBytes });
 }
 
 export async function sendFilesViaRelay(
@@ -126,57 +269,51 @@ export async function sendFilesViaRelay(
   files: File[],
   plan: TransferPlan,
   handlers: SenderRuntimeHandlers,
-  startIndex: number,
+  progress: ResumeProgress | number,
   shouldContinue: () => boolean,
+  onResumeProgress?: (progress: ResumeProgress) => void,
+  scheduler?: Partial<TransferSchedulerOptions>,
 ) {
-  let completedBytes = completedBytesFor(plan, startIndex);
-  let completedFiles = startIndex;
+  const resume = normalizeResumeProgress(plan, coerceResumeProgress(plan, progress));
 
   handlers.onMode("relay");
-  await queue.send({ type: "manifest", files: plan.manifest, totalBytes: plan.totalBytes });
-
-  for (let index = startIndex; index < files.length; index += 1) {
-    assertTransferActive(shouldContinue);
-    const file = files[index];
-    const manifestItem = plan.manifest[index];
-    if (!file || !manifestItem) {
-      continue;
-    }
-
-    let fileBytes = 0;
-    const digest = createSha256Digest();
-    await queue.send({ type: "file-start", file: manifestItem });
-
-    for (let offset = 0; offset < file.size; offset += 64 * 1024) {
-      assertTransferActive(shouldContinue);
-      const bytes = await file.slice(offset, offset + 64 * 1024).arrayBuffer();
-      assertTransferActive(shouldContinue);
-      await queue.send({ type: "chunk", fileId: manifestItem.id, bytes });
-      digest.update(bytes);
-      fileBytes += bytes.byteLength;
-      handlers.onProgress({
-        fileId: manifestItem.id,
-        fileName: manifestItem.name,
-        fileBytes,
-        fileTotalBytes: manifestItem.size,
-        completedBytes: completedBytes + fileBytes,
-        totalBytes: plan.totalBytes,
-        completedFiles,
-        totalFiles: files.length,
-      } satisfies TransferProgress);
-    }
-
-    assertTransferActive(shouldContinue);
-    await queue.send({
-      type: "file-end",
-      fileId: manifestItem.id,
-      bytes: fileBytes,
-      digest: digest.digestHex(),
-    });
-    completedBytes += fileBytes;
-    completedFiles += 1;
-  }
-
-  assertTransferActive(shouldContinue);
-  await queue.send({ type: "complete", totalBytes: plan.totalBytes });
+  await sendScheduledTransfer(files, {
+    handlers,
+    mode: "relay",
+    onResumeProgress,
+    plan,
+    progress: resume,
+    recordEvent: recordTransferTestEvent,
+    scheduler,
+    shouldContinue,
+    transport: {
+      complete: (totalBytes) => queue.send({ type: "complete", totalBytes }),
+      endFile: (file, bytes, digest) =>
+        queue.send({ type: "file-end", fileId: file.id, bytes, digest }),
+      async sendChunk(chunk) {
+        const commit = queue.awaitCommit(
+          chunk.file.id,
+          chunk.chunkIndex,
+          chunk.offset + chunk.bytes.byteLength,
+        );
+        await queue.send({
+          type: "chunk",
+          fileId: chunk.file.id,
+          chunkIndex: chunk.chunkIndex,
+          offset: chunk.offset,
+          bytes: chunk.bytes,
+          chunkDigest: chunk.chunkDigest,
+        });
+        return commit;
+      },
+      sendManifest: (nextPlan) =>
+        queue.send({
+          type: "manifest",
+          files: nextPlan.manifest,
+          totalBytes: nextPlan.totalBytes,
+          manifestHash: nextPlan.manifestHash,
+        }),
+      startFile: (file, offset) => queue.send({ type: "file-start", file, offset }),
+    },
+  });
 }

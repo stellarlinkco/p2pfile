@@ -110,7 +110,7 @@ test("sender-ended metadata is cleaned by Durable Object alarm", async () => {
   expect((await expiredCode.json()) as unknown).toEqual({ message: "session not found" });
 });
 
-test("sender websocket close creates Sender-Ended Session without stale reattach", async () => {
+test("accidental sender websocket close enters reconnect grace and allows original sender reattach", async () => {
   const env = createEnv(createDurableObjects());
   const pairs = installFakeWebSocketPair();
   const { body: created } = await createSession(env);
@@ -140,14 +140,132 @@ test("sender websocket close creates Sender-Ended Session without stale reattach
 
   const view = await handleRequest(request(`/api/sessions/${session.sessionId}`), env);
   const viewBody = SessionPublicViewSchema.parse(await view.json());
-  expect(viewBody.state).toBe("ended");
+  expect(viewBody.state).toBe("reconnecting");
   expect(viewBody.canClaim).toBe(false);
+  expect(viewBody.ended).toBe(false);
+
+  const reattach = await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+    env,
+  );
+  expect(reattach.status).toBe(101);
+
+  const retryClaim = await handleRequest(
+    request(`/api/sessions/${session.sessionId}/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ receiverToken: claim.receiverToken }),
+    }),
+    env,
+  );
+  const retryClaimBody = ClaimSessionResponseSchema.parse(await retryClaim.json());
+  expect(retryClaimBody.status).toBe("claimed");
+  if (retryClaimBody.status !== "claimed") throw new Error("expected claimed status");
+  expect(retryClaimBody.receiverToken).toBe(claim.receiverToken);
+});
+test("accidental sender websocket close after claim preserves Receiver Token re-entry", async () => {
+  const env = createEnv(createDurableObjects());
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+
+  const claim = await claimReceiver(env, session.sessionId);
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+
+  const senderPair = pairs[0];
+  if (!senderPair) throw new Error("expected sender socket");
+  senderPair.client.close(1000, "sender tab closed");
+
+  const retryClaim = await handleRequest(
+    request(`/api/sessions/${session.sessionId}/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ receiverToken: claim.receiverToken }),
+    }),
+    env,
+  );
+  const retryClaimBody = ClaimSessionResponseSchema.parse(await retryClaim.json());
+  expect(retryClaimBody.status).toBe("claimed");
+  if (retryClaimBody.status !== "claimed") throw new Error("expected claimed status");
+  expect(retryClaimBody.receiverToken).toBe(claim.receiverToken);
+  expect(retryClaimBody.session.state).toBe("reconnecting");
+});
+
+test("expired reconnect grace rejects sender reattach and Receiver Token re-entry before alarm runs", async () => {
+  resetEdgeSessionsForTests();
+  const objects = createDurableObjects();
+  const env = createEnv(objects);
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+  const claim = await claimReceiver(env, session.sessionId);
+
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+
+  const senderPair = pairs[0];
+  if (!senderPair) throw new Error("expected sender socket");
+  senderPair.client.close(1000, "sender tab closed");
+  const reconnectView = await handleRequest(request(`/api/sessions/${session.sessionId}`), env);
+  expect(SessionPublicViewSchema.parse(await reconnectView.json()).state).toBe("reconnecting");
+
+  const alarmAt = await (
+    objects.SESSION_OBJECT as unknown as MemoryDurableObjectNamespace<SessionDurableObject>
+  )
+    .storageForName(session.sessionId)
+    .getAlarm();
+  if (alarmAt === null) throw new Error("reconnect timeout alarm must be scheduled");
+  setEdgeNowForTests(() => alarmAt + 1);
 
   const reattach = await handleRequest(
     websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
     env,
   );
   expect(reattach.status).toBe(401);
+
+  const retryClaim = await handleRequest(
+    request(`/api/sessions/${session.sessionId}/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ receiverToken: claim.receiverToken }),
+    }),
+    env,
+  );
+  const retryClaimBody = ClaimSessionResponseSchema.parse(await retryClaim.json());
+  expect(retryClaimBody.status).toBe("ended");
+  expect(retryClaimBody.session.state).toBe("ended");
+  expect(retryClaimBody.session.ended).toBe(true);
+  resetEdgeSessionsForTests();
 });
 
 test("Worker rejects invalid Direct Transfer WebSocket session, role, and token", async () => {

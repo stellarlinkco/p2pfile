@@ -6,14 +6,18 @@ import type { ReceivedFile, ReceiverRuntime, TransferProgress } from "../lib/tra
 import { startReceiverRuntime } from "../lib/transfer";
 import { clearReceivedFiles, stopReceiverRuntime } from "./receive-flow-cleanup";
 import {
-  initialProgress,
+  progressFromCommitted,
+  RECONNECTING_STATUS,
   RETRY_EXHAUSTED_STATUS,
   type ReceiverStage,
   receiverStageFromClaim,
 } from "./receive-flow-utils";
 import {
+  cacheActiveReceiveProgress,
   cacheReceivedFile,
+  clearCachedActiveReceiveProgress,
   clearCachedReceivedFiles,
+  readCachedActiveReceiveProgress,
   readCachedReceivedFiles,
 } from "./received-file-cache";
 
@@ -33,6 +37,18 @@ type ClaimReceiverSessionOptions = {
   setRetriesRemaining: Dispatch<SetStateAction<number | null>>;
   setError: Dispatch<SetStateAction<string | null>>;
 };
+
+export function resumeCommittedBytesByFileId(
+  sessionId: string,
+  manifest: SessionPublicView["files"],
+  resumedFiles: ReceivedFile[],
+) {
+  const committedBytesByFileId = readCachedActiveReceiveProgress(sessionId, manifest);
+  for (const file of resumedFiles) {
+    committedBytesByFileId.set(file.id, file.size);
+  }
+  return committedBytesByFileId;
+}
 
 export async function claimReceiverSession({
   session,
@@ -63,6 +79,7 @@ export async function claimReceiverSession({
   setStage("claiming");
   setError(null);
   setStatus("正在 claim 会话…");
+  let runtimeFinished = false;
   sampleRef.current = null;
 
   try {
@@ -75,6 +92,11 @@ export async function claimReceiverSession({
       retryingSameReceiver || (response.claim === "completed" && response.originalReceiver)
         ? resumeFiles
         : [];
+    const committedBytesByFileId = resumeCommittedBytesByFileId(
+      session.sessionId,
+      response.session.files,
+      resumedFiles,
+    );
     if (resumedFiles.length > 0) {
       restoreReceivedFiles(resumedFiles, receivedFilesRef, setReceivedFiles);
     } else if (!retryingSameReceiver && response.claim === "claimed" && resumeFiles.length > 0) {
@@ -82,7 +104,7 @@ export async function claimReceiverSession({
       void clearCachedReceivedFiles(session.sessionId);
     }
     setSession(response.session);
-    setProgress(initialProgress(response.session, resumedFiles.length));
+    setProgress(progressFromCommitted(response.session, committedBytesByFileId));
     setStage(receiverStageFromClaim(response));
     setRetriesRemaining(response.claim === "claimed" ? response.retriesRemaining : null);
 
@@ -131,28 +153,83 @@ export async function claimReceiverSession({
       response.session.files,
       {
         onStatus(nextStatus) {
-          setStatus(nextStatus);
-          setStage(nextStatus.includes("Receiving") ? "receiving" : "connecting");
+          if (runtimeFinished) {
+            return;
+          }
+          const reconnecting = nextStatus === "Waiting for peer reconnect";
+          setStatus((current) =>
+            current.startsWith("Completed Session View")
+              ? current
+              : reconnecting
+                ? RECONNECTING_STATUS
+                : nextStatus,
+          );
+          if (reconnecting) {
+            setProgress((current) => {
+              if (runtimeFinished) {
+                return current;
+              }
+              return markFileStates(current, "receiving", "reconnecting");
+            });
+          }
+          setStage((current) => {
+            if (runtimeFinished || current === "completed") {
+              return current;
+            }
+            return reconnecting
+              ? "reconnecting"
+              : nextStatus.includes("Receiving")
+                ? "receiving"
+                : "connecting";
+          });
         },
         onMode(nextMode) {
+          if (runtimeFinished) {
+            return;
+          }
           setMode(nextMode);
         },
         onProgress(nextProgress) {
+          if (runtimeFinished) {
+            return;
+          }
           setProgress(nextProgress);
-          setStage("receiving");
+          setStage((current) => (current === "completed" ? current : "receiving"));
+          cacheActiveReceiveProgress(
+            session.sessionId,
+            response.session.files,
+            nextProgress.fileId,
+            nextProgress.fileBytes,
+          );
           updateSpeed(nextProgress, sampleRef, setSpeed);
         },
         onFileReceived(file) {
-          const next = [...receivedFilesRef.current, file];
+          if (runtimeFinished) {
+            return;
+          }
+          clearCachedActiveReceiveProgress(session.sessionId, file.id);
+          const next = mergeReceivedFile(receivedFilesRef.current, file, response.session.files);
           receivedFilesRef.current = next;
           setReceivedFiles(next);
-          void cacheReceivedFile(session.sessionId, file, next.length - 1);
+          const manifestIndex = response.session.files.findIndex(
+            (manifestFile) => manifestFile.id === file.id,
+          );
+          if (manifestIndex >= 0) {
+            void cacheReceivedFile(session.sessionId, file, manifestIndex);
+          }
         },
         onComplete() {
-          const completedFiles = receivedFilesRef.current.map((file) => ({
-            id: file.id,
-            bytes: file.size,
-          }));
+          if (runtimeFinished) {
+            return;
+          }
+          runtimeFinished = true;
+          clearCachedActiveReceiveProgress(session.sessionId);
+          const completedFiles = response.session.files.map((manifestFile) => {
+            const file = receivedFilesRef.current.find(
+              (receivedFile) => receivedFile.id === manifestFile.id,
+            );
+            return { id: manifestFile.id, bytes: file?.size ?? 0 };
+          });
           setStage("completed");
           setStatus("Completed Session View：全部文件已接收并通过字节数校验。");
           void completeSession(
@@ -163,21 +240,68 @@ export async function claimReceiverSession({
           );
         },
         onEnded() {
+          if (runtimeFinished) {
+            return;
+          }
+          runtimeFinished = true;
           setStage("ended");
           setStatus("Sender-Ended Session：发送方已离开，请请求重新创建会话。");
         },
         onError(message) {
+          if (runtimeFinished) {
+            return;
+          }
+          runtimeFinished = true;
           setError(message);
+          setProgress(markIncompleteFileStates);
           setStage("failed");
         },
       },
       resumedFiles,
+      committedBytesByFileId,
     );
   } catch (claimError) {
     setError(claimError instanceof Error ? claimError.message : "Claim 失败。");
     setStage("failed");
     setStatus("Claim 或连接失败。请重试或请求发送方重新创建会话。");
   }
+}
+
+function markFileStates(
+  progress: TransferProgress,
+  from: "queued" | "receiving" | "reconnecting" | "completed" | "failed",
+  to: "queued" | "receiving" | "reconnecting" | "completed" | "failed",
+) {
+  return {
+    ...progress,
+    files: progress.files?.map((file) => ({
+      ...file,
+      state: file.state === from ? to : file.state,
+    })),
+  } satisfies TransferProgress;
+}
+
+function markIncompleteFileStates(progress: TransferProgress) {
+  return {
+    ...progress,
+    files: progress.files?.map((file) => ({
+      ...file,
+      state: file.state === "completed" ? "completed" : "failed",
+    })),
+  } satisfies TransferProgress;
+}
+
+function mergeReceivedFile(
+  current: ReceivedFile[],
+  file: ReceivedFile,
+  manifest: SessionPublicView["files"],
+) {
+  const byId = new Map(current.map((receivedFile) => [receivedFile.id, receivedFile]));
+  byId.set(file.id, file);
+  return manifest.flatMap((manifestFile) => {
+    const receivedFile = byId.get(manifestFile.id);
+    return receivedFile ? [receivedFile] : [];
+  });
 }
 
 function restoreReceivedFiles(

@@ -5,6 +5,8 @@ import {
   CreateSessionRequestSchema,
   DEFAULT_RETRY_BUDGET,
   ReleaseSessionResponseSchema,
+  ResumeProgressSchema,
+  resumeProgressFromManifest,
   SessionStateSchema,
   SignalEnvelopeSchema,
 } from "./session";
@@ -40,7 +42,7 @@ test("session state schema accepts the failed state", () => {
   expect(SessionStateSchema.parse("failed")).toBe("failed");
 });
 
-test("session state schema accepts all eight lifecycle states", () => {
+test("session state schema accepts all nine lifecycle states", () => {
   const states = [
     "waiting",
     "viewing",
@@ -49,12 +51,17 @@ test("session state schema accepts all eight lifecycle states", () => {
     "transferring",
     "completed-view",
     "ended",
+    "reconnecting",
     "failed",
   ] as const;
 
   for (const state of states) {
     expect(SessionStateSchema.parse(state)).toBe(state);
   }
+});
+
+test("session state schema accepts recoverable reconnecting state", () => {
+  expect(SessionStateSchema.parse("reconnecting")).toBe("reconnecting");
 });
 
 test("create session request parses a frozen manifest", () => {
@@ -176,6 +183,30 @@ test("signal envelope validates webrtc and mode payloads", () => {
   });
 });
 
+test("receiver-ready signal requires and preserves ResumeProgress", () => {
+  const manifest = [{ id: "file-1", name: "archive.zip", size: 131072 }];
+  const progress = resumeProgressFromManifest(manifest, new Map([["file-1", 65536]]));
+  const ready = SignalEnvelopeSchema.parse({
+    type: "receiver-ready",
+    payload: {
+      completedFiles: 0,
+      progress,
+      receiverInstanceId: "receiver-reload-1",
+    },
+  });
+
+  expect(ready).toEqual({
+    type: "receiver-ready",
+    payload: { completedFiles: 0, progress, receiverInstanceId: "receiver-reload-1" },
+  });
+  expect(() =>
+    SignalEnvelopeSchema.parse({
+      type: "receiver-ready",
+      payload: { completedFiles: 0 },
+    }),
+  ).toThrow();
+});
+
 test("signal envelope accepts empty ICE candidate end markers", () => {
   const candidate = SignalEnvelopeSchema.parse({
     type: "ice-candidate",
@@ -205,7 +236,10 @@ test("signal envelope validates relay frames and base64 chunk payloads", () => {
       message: {
         type: "chunk",
         fileId: "file-1",
+        chunkIndex: 0,
+        offset: 0,
         bytesBase64: "YWJj",
+        chunkDigest: "0".repeat(64),
       },
     },
   });
@@ -224,7 +258,10 @@ test("signal envelope validates relay frames and base64 chunk payloads", () => {
   expect(relayMessage.payload.message).toEqual({
     type: "chunk",
     fileId: "file-1",
+    chunkIndex: 0,
+    offset: 0,
     bytesBase64: "YWJj",
+    chunkDigest: "0".repeat(64),
   });
   expect(relayAck.payload.sequence).toBe(7);
   expect(() =>
@@ -238,6 +275,37 @@ test("signal envelope validates relay frames and base64 chunk payloads", () => {
           bytes: new ArrayBuffer(1),
         },
       },
+    }),
+  ).toThrow();
+});
+
+test("resume progress validates committed byte invariants", () => {
+  const progress = ResumeProgressSchema.parse({
+    manifestHash: "file-1:archive.zip:131072",
+    files: [
+      {
+        fileId: "file-1",
+        size: 131072,
+        chunkSize: 65536,
+        committedBytes: 65536,
+        completed: false,
+      },
+    ],
+  });
+
+  expect(progress.files[0]?.committedBytes).toBe(65536);
+  expect(() =>
+    ResumeProgressSchema.parse({
+      manifestHash: "file-1:archive.zip:131072",
+      files: [
+        {
+          fileId: "file-1",
+          size: 131072,
+          chunkSize: 65536,
+          committedBytes: 32768,
+          completed: false,
+        },
+      ],
     }),
   ).toThrow();
 });

@@ -76,10 +76,10 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
             <div data-testid="receiver-manifest">
               <ManifestPanel
                 caption="接收前只显示文件名和大小。"
+                fileProgress={flow.progress.files}
                 files={flow.session.files}
                 title="文件清单"
                 totalBytes={flow.session.totalBytes}
-                showStatus={false}
               />
             </div>
           </>
@@ -87,7 +87,7 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
           <EmptyHint title="等待会话入口" body="输入链接或访问码后查看文件清单。" />
         )}
 
-        {flow.stage === "manifest" || flow.stage === "failed" ? (
+        {flow.stage === "manifest" || flow.stage === "failed" || flow.stage === "reconnecting" ? (
           <>
             <button
               className="min-h-12 w-full rounded-lg bg-teal-600 px-4 font-bold text-white disabled:bg-neutral-200 disabled:text-neutral-500"
@@ -117,6 +117,7 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
         ) : null}
 
         {flow.stage === "occupied" ? <OccupiedNotice /> : null}
+        {flow.stage === "reconnecting" ? <ReconnectingNotice /> : null}
         {flow.stage === "retry-exhausted" ? <RetryExhaustedNotice /> : null}
         {flow.stage === "ended" ? <EndedNotice /> : null}
         {flow.stage === "completion-notice" ? <CompletionNotice /> : null}
@@ -162,6 +163,16 @@ function OccupiedNotice() {
   );
 }
 
+function ReconnectingNotice() {
+  return (
+    <NoticeCard
+      body="发送方连接意外中断。请保持当前 Share Link；原 Receiver Token 可继续接收，已完成文件会保留，当前未完成文件会从文件边界重启。"
+      testId="reconnecting-session-notice"
+      title="Waiting for peer reconnect"
+      tone="amber"
+    />
+  );
+}
 function RetryExhaustedNotice() {
   return (
     <NoticeCard

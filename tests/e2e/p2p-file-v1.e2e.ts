@@ -2,15 +2,21 @@ import { expect, test } from "@playwright/test";
 import {
   accessCodeFrom,
   blockReceiverStorageAndFallbackSignals,
+  corruptFirstFallbackChunkDigest,
   countVisible,
   createSession,
   enableTransferFallback,
+  makeSizedTestFile,
   newReceiverPage,
   openReceiver,
   qrShareLinkFrom,
+  recordTransferEvents,
+  slowDirectChunks,
   TEST_FILES,
 } from "./p2p-file-v1.support";
+import { writeEvidence, writeEvidenceScreenshot } from "./worker-share-link.support";
 
+const MANIFEST_CHUNK_BYTES = 64 * 1024;
 test.describe("P2P File v1 session flow", () => {
   test("sender upload surface only advertises available file-picker behavior", async ({ page }) => {
     await page.goto("/");
@@ -203,6 +209,263 @@ test.describe("P2P File v1 session flow", () => {
       await expect(receiver.getByRole("link", { name: "接收其他会话" })).toBeVisible();
       await expect(receiver.getByRole("button", { name: "保存 notes-alpha.txt" })).toBeVisible();
       await expect(receiver.getByRole("button", { name: "保存 notes-beta.json" })).toBeVisible();
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("multi-file transfer resumes completed active and queued manifest files after interruption", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    await recordTransferEvents(page);
+    await slowDirectChunks(page, 100);
+    const files = [
+      makeSizedTestFile("resume-completed-first.txt", MANIFEST_CHUNK_BYTES, "text/plain"),
+      makeSizedTestFile("resume-active-large.zip", 2 * 1024 * 1024, "application/zip"),
+      makeSizedTestFile("resume-third.bin", MANIFEST_CHUNK_BYTES, "application/octet-stream"),
+    ];
+    const shareLink = await createSession(page, files, { fallback: false });
+    const sessionId = new URL(shareLink).pathname.split("/").at(-1);
+    if (!sessionId) throw new Error("share link missing session id");
+    const receiver = await newReceiverPage(page, { fallback: false });
+
+    try {
+      await openReceiver(receiver, shareLink, files, { fallback: false });
+      await receiver.getByTestId("claim-session-button").click();
+      await expect(receiver.getByTestId("mode-disclosure")).toContainText(/Direct Transfer|直传/i);
+
+      const firstCommittedBytes = await page
+        .waitForFunction(
+          () => {
+            const events = (
+              window as typeof window & {
+                __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
+              }
+            ).__P2PFILE_TEST_TRANSFER_EVENTS__;
+            const commit = events?.find(
+              (event) =>
+                event.type === "direct-chunk-commit" &&
+                event.fileId === "local-2" &&
+                Number(event.committedBytes) > 0,
+            );
+            return commit ? Number(commit.committedBytes) : false;
+          },
+          undefined,
+          { timeout: 30_000 },
+        )
+        .then((handle) => handle.jsonValue() as Promise<number>);
+      await expect
+        .poll(
+          () =>
+            receiver.evaluate((id) => {
+              const raw = localStorage.getItem(`p2pfile-active-progress:${id}`);
+              if (!raw) return 0;
+              const progress = JSON.parse(raw) as { fileId?: string; committedBytes?: number };
+              return progress.fileId === "local-2" ? Number(progress.committedBytes) : 0;
+            }, sessionId),
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThanOrEqual(firstCommittedBytes);
+      await page.waitForFunction(
+        () => {
+          const events = (
+            window as typeof window & {
+              __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
+            }
+          ).__P2PFILE_TEST_TRANSFER_EVENTS__;
+          return events?.some(
+            (event) =>
+              (event.type === "direct-file-complete" || event.type === "relay-file-complete") &&
+              event.fileId === "local-1",
+          );
+        },
+        undefined,
+        { timeout: 30_000 },
+      );
+      expect(firstCommittedBytes).toBeGreaterThan(0);
+      expect(firstCommittedBytes).toBeLessThan(files[1].buffer.byteLength);
+
+      await receiver.reload();
+      const resumeOffset = await receiver.evaluate((id) => {
+        const raw = localStorage.getItem(`p2pfile-active-progress:${id}`);
+        if (!raw) return 0;
+        const progress = JSON.parse(raw) as { fileId?: string; committedBytes?: number };
+        return progress.fileId === "local-2" ? Number(progress.committedBytes) : 0;
+      }, sessionId);
+      expect(resumeOffset).toBeGreaterThanOrEqual(firstCommittedBytes);
+      expect(resumeOffset).toBeLessThan(files[1].buffer.byteLength);
+
+      await openReceiver(receiver, shareLink, files, { fallback: false });
+      await expect(receiver.getByTestId("file-state-local-1")).toContainText("completed");
+      await expect(receiver.getByTestId("file-state-local-2")).toContainText("reconnecting");
+      await expect(receiver.getByTestId("file-state-local-3")).toContainText("queued");
+      await writeEvidence("val-rel-010-local-reconnecting-dom-trace.json", {
+        assertionId: "VAL-REL-010",
+        workUnitId: "wu-54565d01",
+        evidenceSource: "controlled",
+        shareLink,
+        reconnectingFileStates: {
+          "local-1": await receiver.getByTestId("file-state-local-1").textContent(),
+          "local-2": await receiver.getByTestId("file-state-local-2").textContent(),
+          "local-3": await receiver.getByTestId("file-state-local-3").textContent(),
+        },
+        resumeOffset,
+      });
+      await receiver.getByTestId("claim-session-button").click();
+      await page.waitForFunction(
+        (expectedOffset) => {
+          const events = (
+            window as typeof window & {
+              __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
+            }
+          ).__P2PFILE_TEST_TRANSFER_EVENTS__;
+          return events?.some(
+            (event) =>
+              (event.type === "direct-file-start" || event.type === "relay-file-start") &&
+              event.fileId === "local-2" &&
+              Number(event.offset) === expectedOffset,
+          );
+        },
+        resumeOffset,
+        { timeout: 30_000 },
+      );
+
+      await expect(
+        receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 60_000 });
+      await expect(
+        page.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 60_000 });
+      for (const file of files) {
+        await expect(receiver.getByRole("button", { name: `保存 ${file.name}` })).toHaveCount(1);
+      }
+
+      const transferEvents = await page.evaluate(
+        () =>
+          ((
+            window as typeof window & {
+              __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
+            }
+          ).__P2PFILE_TEST_TRANSFER_EVENTS__ ?? []) as Record<string, unknown>[],
+      );
+      const fileStarts = transferEvents
+        .filter((event) => event.type === "direct-file-start" || event.type === "relay-file-start")
+        .map((event) => ({ fileId: event.fileId, offset: Number(event.offset) }));
+      expect(fileStarts.filter((event) => event.fileId === "local-1")).toEqual([
+        { fileId: "local-1", offset: 0 },
+      ]);
+      expect(fileStarts).toContainEqual({ fileId: "local-2", offset: 0 });
+      expect(fileStarts).toContainEqual({ fileId: "local-2", offset: resumeOffset });
+      expect(fileStarts).toContainEqual({ fileId: "local-3", offset: 0 });
+      const resumeStartIndex = transferEvents.findIndex(
+        (event) =>
+          (event.type === "direct-file-start" || event.type === "relay-file-start") &&
+          event.fileId === "local-2" &&
+          Number(event.offset) === resumeOffset,
+      );
+      const resentCommittedChunks = transferEvents
+        .slice(resumeStartIndex)
+        .filter(
+          (event) =>
+            (event.type === "direct-chunk-commit" || event.type === "relay-chunk-commit") &&
+            event.fileId === "local-2" &&
+            Number(event.chunkIndex) < Math.floor(resumeOffset / MANIFEST_CHUNK_BYTES),
+        );
+      expect(resentCommittedChunks).toEqual([]);
+    } finally {
+      await receiver.close();
+    }
+  });
+  test("bounded per-file states let small files complete before a large file", async ({ page }) => {
+    test.setTimeout(120_000);
+    await recordTransferEvents(page);
+    await slowDirectChunks(page, 80);
+    const files = [
+      makeSizedTestFile("bounded-large.zip", MANIFEST_CHUNK_BYTES * 12, "application/zip"),
+      makeSizedTestFile("bounded-small.txt", MANIFEST_CHUNK_BYTES, "text/plain"),
+      makeSizedTestFile("bounded-tail.bin", MANIFEST_CHUNK_BYTES, "application/octet-stream"),
+    ];
+    const shareLink = await createSession(page, files, { fallback: false });
+    const receiver = await newReceiverPage(page, { fallback: false });
+
+    try {
+      await openReceiver(receiver, shareLink, files, { fallback: false });
+      await expect(receiver.getByTestId("file-state-local-1")).toContainText("queued");
+      await expect(receiver.getByTestId("file-state-local-2")).toContainText("queued");
+      await receiver.getByTestId("claim-session-button").click();
+      await expect(receiver.getByTestId("mode-disclosure")).toContainText(/Direct Transfer|直传/i);
+
+      await expect(receiver.getByTestId("file-state-local-1")).toContainText("receiving", {
+        timeout: 30_000,
+      });
+      await expect(receiver.getByTestId("file-state-local-2")).toContainText("completed", {
+        timeout: 30_000,
+      });
+      await expect(receiver.getByTestId("file-state-local-1")).toContainText("receiving");
+
+      await expect(
+        receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 90_000 });
+      const transferEvents = await page.evaluate(
+        () =>
+          ((
+            window as typeof window & {
+              __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
+            }
+          ).__P2PFILE_TEST_TRANSFER_EVENTS__ ?? []) as Record<string, unknown>[],
+      );
+      const largeCompleteIndex = transferEvents.findIndex(
+        (event) => event.type === "direct-file-complete" && event.fileId === "local-1",
+      );
+      const smallCompleteIndex = transferEvents.findIndex(
+        (event) => event.type === "direct-file-complete" && event.fileId === "local-2",
+      );
+      expect(smallCompleteIndex).toBeGreaterThanOrEqual(0);
+      expect(largeCompleteIndex).toBeGreaterThan(smallCompleteIndex);
+      for (const file of files) {
+        await expect(receiver.getByRole("button", { name: `保存 ${file.name}` })).toHaveCount(1);
+      }
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("per-file states show failed when a fallback transfer chunk is rejected", async ({
+    page,
+  }) => {
+    await corruptFirstFallbackChunkDigest(page);
+    const files = [
+      makeSizedTestFile("failed-large.zip", MANIFEST_CHUNK_BYTES * 2, "application/zip"),
+      makeSizedTestFile("failed-tail.bin", MANIFEST_CHUNK_BYTES, "application/octet-stream"),
+    ];
+    const shareLink = await createSession(page, files);
+    const receiver = await newReceiverPage(page);
+
+    try {
+      await openReceiver(receiver, shareLink, files);
+      await receiver.getByTestId("claim-session-button").click();
+      await expect(receiver.getByTestId("file-state-local-1")).toContainText("failed", {
+        timeout: 30_000,
+      });
+      await expect(receiver.getByTestId("file-state-local-2")).toContainText("failed");
+      await expect(receiver.getByTestId("claim-session-button")).toBeVisible();
+      await expect(receiver.getByText(/Chunk integrity verification failed/)).toBeVisible();
+      const screenshotPath = await writeEvidenceScreenshot(
+        receiver,
+        "val-rel-010-failed-states.png",
+      );
+      await writeEvidence("val-rel-010-local-failed-dom-trace.json", {
+        assertionId: "VAL-REL-010",
+        workUnitId: "wu-54565d01",
+        evidenceSource: "controlled",
+        shareLink,
+        failedFileStates: {
+          "local-1": await receiver.getByTestId("file-state-local-1").textContent(),
+          "local-2": await receiver.getByTestId("file-state-local-2").textContent(),
+        },
+        screenshotPath,
+      });
     } finally {
       await receiver.close();
     }

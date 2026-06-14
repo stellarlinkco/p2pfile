@@ -20,10 +20,12 @@ import {
   COMPLETED_SESSION_VIEW_TTL_MS,
   isActiveSession,
   isExpired,
+  isReconnectGraceExpired,
   isSenderLiveSession,
   matchesCompletedManifest,
   OPEN_SESSION_TTL_MS,
   readSession,
+  SENDER_RECONNECT_GRACE_MS,
   SESSION_STORAGE_KEY,
   type SessionCreatePayload,
   type SessionRecord,
@@ -58,6 +60,11 @@ export class SessionDurableObject implements DurableObject {
       await this.deleteSession();
       return notFound("session not found");
     }
+    if (isReconnectGraceExpired(session)) {
+      await this.markSenderEnded(session, "sender-reconnect-timeout");
+      session.state = "ended";
+      session.openExpiresAt = currentTime.now() + COMPLETED_SESSION_VIEW_TTL_MS;
+    }
 
     if (request.method === "GET" && url.pathname === "/view") {
       if (session.state === "waiting") {
@@ -91,6 +98,10 @@ export class SessionDurableObject implements DurableObject {
       await this.state.storage.deleteAlarm();
       return;
     }
+    if (isReconnectGraceExpired(session)) {
+      await this.markSenderEnded(session, "sender-reconnect-timeout");
+      return;
+    }
     if (isExpired(session)) {
       await this.deleteSession();
       return;
@@ -109,7 +120,8 @@ export class SessionDurableObject implements DurableObject {
         session.state === "viewing" ||
         session.state === "completed-view" ||
         session.state === "ended" ||
-        session.state === "failed") &&
+        session.state === "failed" ||
+        session.state === "reconnecting") &&
       session.openExpiresAt > currentTime.now()
     ) {
       await this.state.storage.setAlarm(session.openExpiresAt);
@@ -243,12 +255,24 @@ export class SessionDurableObject implements DurableObject {
   }
 
   private async markSenderEnded(session: SessionRecord, reason: string) {
-    if (!isSenderLiveSession(session)) return;
-    session.state = "ended";
-    session.openExpiresAt = currentTime.now() + COMPLETED_SESSION_VIEW_TTL_MS;
-    await this.persistSession(session);
+    const latest = (await readSession(this.state.storage)) ?? session;
+    if (!isSenderLiveSession(latest)) return;
+    latest.state = "ended";
+    latest.openExpiresAt = currentTime.now() + COMPLETED_SESSION_VIEW_TTL_MS;
+    await this.persistSession(latest);
     this.sockets.receiver?.send(JSON.stringify({ type: "sender-left", payload: { reason } }));
     closeSockets(this.sockets);
+  }
+
+  private async markSenderReconnecting(session: SessionRecord) {
+    const latest = (await readSession(this.state.storage)) ?? session;
+    if (!isSenderLiveSession(latest) || latest.state === "reconnecting") return;
+    latest.state = "reconnecting";
+    this.sockets.receiver?.send(
+      JSON.stringify({ type: "sender-reconnecting", payload: { reason: "sender-disconnected" } }),
+    );
+    latest.openExpiresAt = currentTime.now() + SENDER_RECONNECT_GRACE_MS;
+    await this.persistSession(latest);
   }
 
   private handleWebSocket(session: SessionRecord, role: SessionRole, token: string) {
@@ -264,6 +288,12 @@ export class SessionDurableObject implements DurableObject {
     const server = pair[1];
     server.accept();
 
+    if (role === "sender" && session.state === "reconnecting") {
+      session.state = session.receiverToken ? "claimed" : "viewing";
+      session.openExpiresAt = session.receiverToken ? 0 : currentTime.now() + OPEN_SESSION_TTL_MS;
+      void this.persistSession(session);
+    }
+
     const replaced = this.sockets[role];
     this.sockets[role] = server;
     replaced?.close(1000, "replaced");
@@ -273,7 +303,7 @@ export class SessionDurableObject implements DurableObject {
     server.addEventListener("close", () => {
       if (this.sockets[role] !== server) return;
       delete this.sockets[role];
-      if (role === "sender") void this.markSenderEnded(session, "sender-disconnected");
+      if (role === "sender") void this.markSenderReconnecting(session);
     });
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -285,7 +315,13 @@ export class SessionDurableObject implements DurableObject {
     event: MessageEvent,
   ) {
     const envelope = parseDirectSignal(event.data);
-    if (!envelope || !isRoleAllowedSignal(role, envelope)) {
+    const allowedRelayCommitSignal =
+      envelope &&
+      ((role === "receiver" &&
+        envelope.type === "relay-message" &&
+        envelope.payload.message.type === "chunk-commit") ||
+        (role === "sender" && envelope.type === "relay-ack"));
+    if (!envelope || (!isRoleAllowedSignal(role, envelope) && !allowedRelayCommitSignal)) {
       socket.close(1003, "invalid signal message");
       return;
     }

@@ -7,6 +7,8 @@ export type {
   ReceiverRuntimeHandlers,
   SenderRuntime,
   SenderRuntimeHandlers,
+  TransferFileProgress,
+  TransferFileState,
   TransferProgress,
   TransferProtocolMessage,
 } from "./transfer/types";

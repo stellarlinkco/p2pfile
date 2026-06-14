@@ -47,6 +47,7 @@ export function HomePageView({ sender }: HomePageViewProps) {
             <div className="min-w-0" data-testid="frozen-manifest">
               <ManifestPanel
                 caption="接收前只显示文件名和大小。"
+                fileProgress={sender.progress.files}
                 files={displayedManifest}
                 title="文件清单"
                 totalBytes={displayedTotalBytes}

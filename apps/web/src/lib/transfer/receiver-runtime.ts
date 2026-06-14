@@ -1,6 +1,6 @@
-import type { FileManifestItem } from "@p2pfile/shared";
+import { type FileManifestItem, resumeProgressFromManifest } from "@p2pfile/shared";
 import { getSignalUrl } from "../api";
-import { fromRelayMessage } from "./relay-runtime";
+import { fromRelayMessage, toRelayMessage } from "./relay-runtime";
 import {
   applyMode,
   awaitIceComplete,
@@ -16,6 +16,7 @@ import {
   sendSignal,
 } from "./runtime-shared";
 import type {
+  BrowserSignalMessage,
   ReceivedFile,
   ReceiverRuntime,
   ReceiverRuntimeHandlers,
@@ -26,27 +27,73 @@ function restoreProgressState(
   expectedManifest: FileManifestItem[],
   receivedFiles: ReceivedFile[],
   handlers: ReceiverRuntimeHandlers,
+  committedBytesByFileId: ReadonlyMap<string, number>,
 ) {
-  const completedIds = new Set(receivedFiles.map((file) => file.id));
-  let completedBytes = 0;
-  for (const file of expectedManifest) {
-    if (!completedIds.has(file.id)) {
-      break;
-    }
-    completedBytes += file.size;
-  }
-
-  const nextFile = expectedManifest[receivedFiles.length] ?? null;
+  const committed = seedCommittedBytes(receivedFiles, committedBytesByFileId);
+  const progress = resumeProgressFromManifest(expectedManifest, committed);
+  const activeIndex = progress.files.findIndex(
+    (file) => !file.completed && file.committedBytes > 0,
+  );
+  const nextIndex =
+    activeIndex >= 0 ? activeIndex : progress.files.findIndex((file) => !file.completed);
+  const nextFile = nextIndex >= 0 ? expectedManifest[nextIndex] : null;
+  const nextProgress = nextIndex >= 0 ? progress.files[nextIndex] : null;
   handlers.onProgress({
     fileId: nextFile?.id ?? null,
     fileName: nextFile?.name ?? null,
-    fileBytes: 0,
+    fileBytes: nextProgress?.committedBytes ?? 0,
     fileTotalBytes: nextFile?.size ?? 0,
-    completedBytes,
+    completedBytes: progress.files.reduce((sum, file) => sum + file.committedBytes, 0),
     totalBytes: expectedManifest.reduce((sum, file) => sum + file.size, 0),
-    completedFiles: receivedFiles.length,
+    completedFiles: progress.files.filter((file) => file.completed).length,
     totalFiles: expectedManifest.length,
+    files: expectedManifest.map((file, index) => {
+      const fileProgress = progress.files[index];
+      const fileBytes = fileProgress?.committedBytes ?? 0;
+      return {
+        fileId: file.id,
+        fileName: file.name,
+        fileBytes,
+        fileTotalBytes: file.size,
+        state: fileProgress?.completed ? "completed" : fileBytes > 0 ? "reconnecting" : "queued",
+      };
+    }),
   });
+}
+
+function progressFromState(
+  expectedManifest: FileManifestItem[],
+  completedFiles: ReceivedFile[],
+  committedBytesByFileId: ReadonlyMap<string, number>,
+) {
+  const committed = seedCommittedBytes(completedFiles, committedBytesByFileId);
+  return resumeProgressFromManifest(expectedManifest, committed);
+}
+
+function nextRelayEnvelope(
+  sequence: number,
+  message: TransferProtocolMessage,
+): BrowserSignalMessage & { type: "relay-message" } {
+  return {
+    type: "relay-message",
+    payload: {
+      sequence,
+      message: toRelayMessage(message),
+    },
+  };
+}
+function seedCommittedBytes(
+  completedFiles: ReceivedFile[],
+  committedBytesByFileId: ReadonlyMap<string, number>,
+) {
+  const committed = new Map(committedBytesByFileId);
+  for (const file of completedFiles) {
+    committed.set(file.id, file.size);
+  }
+  return committed;
+}
+function makeReceiverInstanceId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
 export async function startReceiverRuntime(
@@ -55,21 +102,22 @@ export async function startReceiverRuntime(
   expectedManifest: FileManifestItem[],
   handlers: ReceiverRuntimeHandlers,
   receivedFiles: ReceivedFile[] = [],
+  committedBytesByFileId: ReadonlyMap<string, number> = new Map(),
 ): Promise<ReceiverRuntime> {
   const ws = new WebSocket(getSignalUrl(sessionId, "receiver", receiverToken));
   const pc = makePeerConnection(ws, handlers, "Connecting");
-  const state = buildReceiverState(expectedManifest);
   const pendingRelayMessages = new Map<number, TransferProtocolMessage>();
+  const seededCommittedBytes = seedCommittedBytes(receivedFiles, committedBytesByFileId);
+  const state = buildReceiverState(expectedManifest, seededCommittedBytes, sessionId);
   let nextRelaySequence = 0;
+  let nextOutgoingRelaySequence = 0;
   let relayRequested = false;
   let relayAnnounceTimer: ReturnType<typeof setInterval> | null = null;
   let dataChannelOpen = false;
   let stopped = false;
-
-  if (receivedFiles.length > 0) {
-    state.receivedFiles = receivedFiles.length;
-    state.completedBytes = receivedFiles.reduce((sum, file) => sum + file.size, 0);
-    restoreProgressState(expectedManifest, receivedFiles, handlers);
+  const receiverInstanceId = makeReceiverInstanceId();
+  if (seededCommittedBytes.size > 0) {
+    restoreProgressState(expectedManifest, receivedFiles, handlers, seededCommittedBytes);
   }
 
   const announceRelay = () => {
@@ -100,42 +148,32 @@ export async function startReceiverRuntime(
     relayAnnounceTimer ??= setInterval(announceRelay, 250);
   };
 
-  const processTransferMessage = async (message: TransferProtocolMessage) => {
+  const processTransferMessage = async (message: TransferProtocolMessage, viaRelay = false) => {
     if (stopped) {
       return;
     }
 
     try {
-      if (message.type === "file-start" && state.receivedFiles > 0) {
-        const alreadyReceived = expectedManifest[state.receivedFiles - 1];
-        const nextExpected = expectedManifest[state.receivedFiles];
-        if (alreadyReceived && message.file.id === alreadyReceived.id) {
-          state.currentFile = null;
-          state.currentChunks = [];
-          state.currentBytes = 0;
-          return;
-        }
-        if (nextExpected && message.file.id !== nextExpected.id) {
-          throw new Error("Sender resumed from the wrong file.");
-        }
-      }
-
-      if (message.type === "chunk" && state.currentFile === null && state.receivedFiles > 0) {
-        return;
-      }
-
-      if (message.type === "file-end" && state.currentFile === null && state.receivedFiles > 0) {
-        const alreadyReceived = expectedManifest[state.receivedFiles - 1];
-        if (alreadyReceived && message.fileId === alreadyReceived.id) {
-          return;
-        }
-      }
-
-      await handleProtocolMessage(message, state, handlers);
+      await handleProtocolMessage(message, state, handlers, {
+        onChunkCommit(ack) {
+          if (viaRelay || relayRequested) {
+            sendSignal(ws, nextRelayEnvelope(nextOutgoingRelaySequence, ack));
+            nextOutgoingRelaySequence += 1;
+            return;
+          }
+          if (dataChannelOpen) {
+            for (const sender of activeDirectChannels) sender.send(JSON.stringify(ack));
+          }
+        },
+      });
       if (message.type === "file-end") {
         sendSignal(ws, {
           type: "receiver-ready",
-          payload: { completedFiles: state.receivedFiles },
+          payload: {
+            progress: resumeProgressFromManifest(expectedManifest, state.committedBytesByFileId),
+            completedFiles: state.receivedFiles,
+            receiverInstanceId,
+          },
         });
       }
     } catch (error) {
@@ -148,13 +186,14 @@ export async function startReceiverRuntime(
   };
 
   let processingChain = Promise.resolve();
-  const handleTransferMessage = (message: TransferProtocolMessage) => {
-    processingChain = processingChain.then(() => processTransferMessage(message));
-  };
 
   const handleRelayMessage = (sequence: number, message: TransferProtocolMessage) => {
     if (sequence < nextRelaySequence) {
-      return;
+      if (sequence !== 0 || message.type !== "manifest") {
+        return;
+      }
+      pendingRelayMessages.clear();
+      nextRelaySequence = 0;
     }
 
     pendingRelayMessages.set(sequence, message);
@@ -163,14 +202,21 @@ export async function startReceiverRuntime(
       pendingRelayMessages.delete(nextRelaySequence);
       nextRelaySequence += 1;
       if (nextMessage) {
-        handleTransferMessage(nextMessage);
+        handleTransferMessage(nextMessage, true);
       }
     }
   };
 
+  const handleTransferMessage = (message: TransferProtocolMessage, viaRelay = false) => {
+    processingChain = processingChain.then(() => processTransferMessage(message, viaRelay));
+  };
+
+  const activeDirectChannels = new Set<RTCDataChannel>();
   pc.addEventListener("datachannel", (event) => {
     const channel = event.channel;
+    activeDirectChannels.add(channel);
     channel.binaryType = "arraybuffer";
+    channel.addEventListener("close", () => activeDirectChannels.delete(channel), { once: true });
     channel.addEventListener("open", () => {
       dataChannelOpen = true;
       if (!relayRequested) {
@@ -194,7 +240,10 @@ export async function startReceiverRuntime(
         handleTransferMessage({
           type: "chunk",
           fileId: state.currentFile.id,
+          chunkIndex: Math.floor(state.currentBytes / (64 * 1024)),
+          offset: state.currentBytes,
           bytes: dataEvent.data,
+          chunkDigest: "",
         });
       }
     });
@@ -260,13 +309,25 @@ export async function startReceiverRuntime(
       return;
     }
 
+    if (message.type === "sender-reconnecting") {
+      handlers.onStatus("Waiting for peer reconnect");
+      return;
+    }
+
     if (message.type === "sender-left") {
       handlers.onEnded();
     }
   });
 
   await awaitSocketOpen(ws);
-  sendSignal(ws, { type: "receiver-ready", payload: { completedFiles: receivedFiles.length } });
+  sendSignal(ws, {
+    type: "receiver-ready",
+    payload: {
+      progress: progressFromState(expectedManifest, receivedFiles, committedBytesByFileId),
+      completedFiles: receivedFiles.length,
+      receiverInstanceId,
+    },
+  });
 
   if (preferRelayInTests()) {
     requestRelay();

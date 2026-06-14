@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { resumeProgressFromManifest } from "@p2pfile/shared";
 import type { RedisLike } from "./redis-session-storage";
 import { RedisSessionStore } from "./redis-store";
 
@@ -121,17 +122,37 @@ test("RedisSessionStore forwards websocket signals between same-process peers", 
       created.sessionId,
       "receiver",
       claimed.receiverToken,
-      JSON.stringify({ type: "receiver-ready", payload: { completedFiles: 1 } }),
+      JSON.stringify({
+        type: "receiver-ready",
+        payload: {
+          completedFiles: 1,
+          progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+        },
+      }),
     ),
   ).toBe(true);
-  expect(sender.sent).toEqual([{ type: "receiver-ready", payload: { completedFiles: 1 } }]);
+  expect(sender.sent).toEqual([
+    {
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 1,
+        progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+      },
+    },
+  ]);
 
   expect(
     await store.handleSignal(
       created.sessionId,
       "sender",
       created.senderToken,
-      JSON.stringify({ type: "receiver-ready", payload: { completedFiles: 1 } }),
+      JSON.stringify({
+        type: "receiver-ready",
+        payload: {
+          completedFiles: 1,
+          progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+        },
+      }),
     ),
   ).toBe(false);
 });

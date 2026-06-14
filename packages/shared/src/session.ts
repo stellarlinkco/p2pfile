@@ -20,6 +20,7 @@ export const SessionStateSchema = z.enum([
   "connecting",
   "transferring",
   "completed-view",
+  "reconnecting",
   "ended",
   "failed",
 ]);
@@ -32,6 +33,91 @@ export const FileManifestItemSchema = z.object({
 });
 
 export const FrozenManifestSchema = z.array(FileManifestItemSchema).min(1);
+export const MANIFEST_CHUNK_BYTES = 64 * 1024;
+
+export function manifestHash(files: Array<{ id: string; name: string; size: number }>) {
+  return files.map((file) => `${file.id}:${file.name}:${file.size}`).join("|");
+}
+
+export const ResumeProgressFileSchema = z.object({
+  fileId: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  chunkSize: z.number().int().positive(),
+  committedBytes: z.number().int().nonnegative(),
+  completed: z.boolean(),
+});
+
+export const ResumeProgressSchema = z
+  .object({
+    manifestHash: z.string().min(1),
+    files: z.array(ResumeProgressFileSchema).min(1),
+  })
+  .superRefine((progress, context) => {
+    for (const [index, file] of progress.files.entries()) {
+      if (file.committedBytes > file.size) {
+        context.addIssue({
+          code: "custom",
+          path: ["files", index, "committedBytes"],
+          message: "Committed bytes must not exceed file size.",
+        });
+      }
+      if (
+        file.completed !== (file.committedBytes === file.size && (file.size > 0 || file.completed))
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["files", index, "completed"],
+          message: "Completed must match committed bytes.",
+        });
+      }
+      if (file.committedBytes !== file.size && file.committedBytes % file.chunkSize !== 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["files", index, "committedBytes"],
+          message: "Committed bytes must align to chunk boundaries.",
+        });
+      }
+    }
+  });
+
+export const TransferChunkSchema = z.object({
+  type: z.literal("chunk"),
+  fileId: z.string().min(1),
+  chunkIndex: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  bytes: z.instanceof(ArrayBuffer),
+  chunkDigest: z.string().regex(/^[0-9a-f]{64}$/),
+});
+
+export const ChunkCommitAckSchema = z.object({
+  type: z.literal("chunk-commit"),
+  fileId: z.string().min(1),
+  chunkIndex: z.number().int().nonnegative(),
+  committedBytes: z.number().int().nonnegative(),
+});
+
+export function resumeProgressFromManifest(
+  files: Array<{ id: string; name: string; size: number }>,
+  committedBytesByFileId: ReadonlyMap<string, number> = new Map(),
+) {
+  return ResumeProgressSchema.parse({
+    manifestHash: manifestHash(files),
+    files: files.map((file) => {
+      const committedBytes = Math.max(
+        0,
+        Math.min(committedBytesByFileId.get(file.id) ?? 0, file.size),
+      );
+      return {
+        fileId: file.id,
+        size: file.size,
+        chunkSize: MANIFEST_CHUNK_BYTES,
+        committedBytes,
+        completed:
+          committedBytes === file.size && (file.size > 0 || committedBytesByFileId.has(file.id)),
+      };
+    }),
+  });
+}
 
 export const CreateSessionRequestSchema = z.object({
   manifest: FrozenManifestSchema,
@@ -152,7 +238,9 @@ export const ReceiverCompletedStatusSchema = z.object({
 });
 
 export const ReceiverReadyStatusSchema = z.object({
-  completedFiles: z.number().int().nonnegative(),
+  progress: ResumeProgressSchema,
+  completedFiles: z.number().int().nonnegative().optional(),
+  receiverInstanceId: z.string().min(1).optional(),
 });
 
 const RTCSessionDescriptionPayloadSchema = z.object({
@@ -160,21 +248,28 @@ const RTCSessionDescriptionPayloadSchema = z.object({
   sdp: z.string().min(1),
 });
 
+const ChunkCommitAckMessageSchema = ChunkCommitAckSchema;
 const RelayProtocolMessageSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("manifest"),
     files: z.array(FileManifestItemSchema).min(1),
     totalBytes: z.number().int().nonnegative(),
+    manifestHash: z.string().min(1),
   }),
   z.object({
     type: z.literal("file-start"),
     file: FileManifestItemSchema,
+    offset: z.number().int().nonnegative(),
   }),
   z.object({
     type: z.literal("chunk"),
     fileId: z.string().min(1),
+    chunkIndex: z.number().int().nonnegative(),
+    offset: z.number().int().nonnegative(),
     bytesBase64: z.string().min(1),
+    chunkDigest: z.string().regex(/^[0-9a-f]{64}$/),
   }),
+  ChunkCommitAckMessageSchema,
   z.object({
     type: z.literal("file-end"),
     fileId: z.string().min(1),
@@ -280,5 +375,8 @@ export type SessionMutationResponse = z.infer<typeof SessionMutationResponseSche
 export type AccessCodeResolveResponse = z.infer<typeof AccessCodeResolveResponseSchema>;
 export type AppStatus = z.infer<typeof AppStatusSchema>;
 export type SenderHeartbeat = z.infer<typeof SenderHeartbeatSchema>;
+export type ResumeProgress = z.infer<typeof ResumeProgressSchema>;
+export type TransferChunk = z.infer<typeof TransferChunkSchema>;
+export type ChunkCommitAck = z.infer<typeof ChunkCommitAckSchema>;
 export type ReceiverCompletedStatus = z.infer<typeof ReceiverCompletedStatusSchema>;
 export type SignalEnvelope = z.infer<typeof SignalEnvelopeSchema>;

@@ -59,6 +59,13 @@ function progressFromFiles(files: File[]): TransferProgress {
     totalBytes: files.reduce((sum, file) => sum + file.size, 0),
     completedFiles: 0,
     totalFiles: files.length,
+    files: files.map((file, index) => ({
+      fileId: `local-${index + 1}`,
+      fileName: file.name,
+      fileBytes: 0,
+      fileTotalBytes: file.size,
+      state: "queued",
+    })),
   };
 }
 

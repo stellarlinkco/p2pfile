@@ -1,5 +1,5 @@
-import type { FileManifestItem } from "@p2pfile/shared";
-import { getSignalUrl } from "../api";
+import type { FileManifestItem, ResumeProgress } from "@p2pfile/shared";
+import { getSession, getSignalUrl } from "../api";
 import { RelayMessageQueue } from "./relay-queue";
 import {
   applyMode,
@@ -12,12 +12,15 @@ import {
 import { SenderFallbackController } from "./sender-fallback";
 import {
   buildTransferPlan,
+  completedFilesFromProgress,
+  initialResumeProgress,
+  mergeResumeProgress,
   reportResumeProgress,
   sendFiles,
   sendFilesViaRelay,
 } from "./sender-runtime-helpers";
 import { attachSenderSignalHandler } from "./sender-signal-handler";
-import type { SenderRuntime, SenderRuntimeHandlers } from "./types";
+import type { BrowserSignalMessage, SenderRuntime, SenderRuntimeHandlers } from "./types";
 
 export function shouldReuseDirectAttempt(
   pc: RTCPeerConnection | null,
@@ -30,6 +33,10 @@ export function shouldReuseDirectAttempt(
   return pc.signalingState !== "closed" && channel.readyState === "connecting";
 }
 
+function openSenderSignalSocket(sessionId: string, senderToken: string) {
+  return new WebSocket(getSignalUrl(sessionId, "sender", senderToken));
+}
+
 export async function startSenderRuntime(
   sessionId: string,
   senderToken: string,
@@ -37,14 +44,15 @@ export async function startSenderRuntime(
   manifest: FileManifestItem[],
   handlers: SenderRuntimeHandlers,
 ): Promise<SenderRuntime> {
-  const ws = new WebSocket(getSignalUrl(sessionId, "sender", senderToken));
+  let ws = openSenderSignalSocket(sessionId, senderToken);
   const relayOnly = preferRelayInTests();
   const plan = buildTransferPlan(files, manifest);
   const queue = new RelayMessageQueue((message) => sendSignal(ws, message));
   let stopped = false;
   let completed = false;
   let transferring = false;
-  let confirmedCompletedFiles = 0;
+  let receiverProgress: ResumeProgress = initialResumeProgress(plan);
+  let receiverInstanceId: string | null = null;
   const fallback = new SenderFallbackController(relayOnly, handlers);
   let pc: RTCPeerConnection | null = null;
   let channel: RTCDataChannel | null = null;
@@ -80,15 +88,31 @@ export async function startSenderRuntime(
     handlers.onComplete();
   };
 
-  const updateConfirmedCompletedFiles = (nextCompletedFiles: number) => {
-    const normalizedCount = Math.max(0, Math.min(nextCompletedFiles, plan.manifest.length));
-    if (normalizedCount === confirmedCompletedFiles) return;
-    confirmedCompletedFiles = normalizedCount;
-    reportResumeProgress(plan, confirmedCompletedFiles, handlers);
+  const updateReceiverProgress = (nextProgress: ResumeProgress, authoritativeReset = false) => {
+    const normalized = mergeResumeProgress(plan, receiverProgress, nextProgress, {
+      authoritativeReset,
+    });
+    if (JSON.stringify(normalized) === JSON.stringify(receiverProgress)) return false;
+    receiverProgress = normalized;
+    reportResumeProgress(plan, receiverProgress, handlers);
+    return true;
   };
+  const receiverProgressIsComplete = () =>
+    completedFilesFromProgress(receiverProgress) === plan.manifest.length &&
+    receiverProgress.files.every((file) => file.completed && file.committedBytes === file.size);
 
   const currentTransferActive = (token: number) =>
     !stopped && !completed && transferring && token === transferToken;
+  const waitForCompletedSessionView = async (token: number) => {
+    while (currentTransferActive(token)) {
+      const session = await getSession(sessionId);
+      if (session.completed) {
+        markCompleted();
+        return;
+      }
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 250));
+    }
+  };
 
   const handleTransferFailure = (error: unknown) => {
     if (stopped || completed) return;
@@ -120,9 +144,11 @@ export async function startSenderRuntime(
         files,
         plan,
         handlers,
-        confirmedCompletedFiles,
+        receiverProgress,
         () => currentTransferActive(token) && channel === nextChannel,
+        updateReceiverProgress,
       );
+      await waitForCompletedSessionView(token);
     } catch (error) {
       if (channel === nextChannel) closeDirectTransport();
       handleTransferFailure(error);
@@ -147,10 +173,22 @@ export async function startSenderRuntime(
     const token = transferToken + 1;
     transferToken = token;
     try {
-      await sendFilesViaRelay(queue, files, plan, handlers, confirmedCompletedFiles, () =>
-        currentTransferActive(token),
+      sendSignal(ws, { type: "mode", payload: { mode: "relay" } });
+      await sendFilesViaRelay(
+        queue,
+        files,
+        plan,
+        handlers,
+        receiverProgress,
+        () => currentTransferActive(token),
+        updateReceiverProgress,
       );
+      await waitForCompletedSessionView(token);
     } catch (error) {
+      if (error instanceof Error && error.message === "Transfer restarted.") {
+        handleTransferFailure(error);
+        return;
+      }
       fallback.markRelayFailed();
       continueFallback();
       handleTransferFailure(error);
@@ -224,9 +262,31 @@ export async function startSenderRuntime(
     void sendOffer(pc);
   };
 
-  const handleReceiverReady = (nextCompletedFiles: number) => {
-    updateConfirmedCompletedFiles(nextCompletedFiles);
-    if (completed || stopped || transferring) return;
+  const recordSenderTestEvent = (event: Record<string, unknown>) => {
+    const target = globalThis as {
+      __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
+    };
+    target.__P2PFILE_TEST_TRANSFER_EVENTS__?.push(event);
+  };
+
+  const handleReceiverReady = (
+    payload: Extract<BrowserSignalMessage, { type: "receiver-ready" }>["payload"],
+  ) => {
+    recordSenderTestEvent({ type: "sender-receiver-ready", mode: fallback.mode });
+    const nextInstanceId =
+      typeof payload.receiverInstanceId === "string" ? payload.receiverInstanceId : null;
+    const receiverRestarted = nextInstanceId !== null && nextInstanceId !== receiverInstanceId;
+    if (nextInstanceId !== null) {
+      receiverInstanceId = nextInstanceId;
+    }
+    const progressChanged = updateReceiverProgress(payload.progress, receiverRestarted);
+    if (completed || stopped) return;
+    if (transferring && !receiverProgressIsComplete() && (progressChanged || receiverRestarted)) {
+      transferring = false;
+      queue.reset();
+      closeDirectTransport();
+    }
+    if (transferring) return;
     if (fallback.mode === "ws-relay") {
       void beginRelayTransfer();
       return;
@@ -238,18 +298,53 @@ export async function startSenderRuntime(
     createDirectAttempt();
   };
 
-  attachSenderSignalHandler({
-    ws,
-    queue,
-    handlers,
-    isStopped: () => stopped,
-    getPeerConnection: () => pc,
-    handleReceiverReady,
-    markDirectFailed: () => fallback.markDirectFailed(),
-    continueFallback,
-    stopRelayMode: () => fallback.stopRelayMode(),
-    markCompleted,
-  });
+  const reattachSignalSocket = () => {
+    if (stopped || completed) return;
+    transferring = false;
+    queue.reset();
+    closeDirectTransport();
+    handlers.onStatus("Waiting for peer reconnect");
+    ws = openSenderSignalSocket(sessionId, senderToken);
+    attachSignalSocket(ws);
+    void awaitSocketOpen(ws)
+      .then(() => {
+        if (stopped || completed) return;
+        if (relayOnly) {
+          fallback.startRelayMode(() =>
+            sendSignal(ws, { type: "mode", payload: { mode: "relay" } }),
+          );
+        } else {
+          createDirectAttempt();
+        }
+      })
+      .catch((error) => {
+        if (!stopped && !completed) {
+          handlers.onError(
+            error instanceof Error ? error.message : "Signal socket reconnect failed.",
+          );
+        }
+      });
+  };
+
+  const attachSignalSocket = (signalSocket: WebSocket) => {
+    attachSenderSignalHandler({
+      ws: signalSocket,
+      queue,
+      handlers,
+      isStopped: () => stopped || signalSocket !== ws,
+      getPeerConnection: () => pc,
+      handleReceiverReady,
+      markDirectFailed: () => fallback.markDirectFailed(),
+      continueFallback,
+      stopRelayMode: () => fallback.stopRelayMode(),
+      markCompleted,
+    });
+    signalSocket.addEventListener("close", () => {
+      if (signalSocket === ws) reattachSignalSocket();
+    });
+  };
+
+  attachSignalSocket(ws);
 
   await awaitSocketOpen(ws);
   if (relayOnly) {
@@ -270,6 +365,9 @@ export async function startSenderRuntime(
     },
     markSenderLeft() {
       sendSignal(ws, { type: "sender-left", payload: {} });
+      stopped = true;
+      transferring = false;
+      ws.close();
     },
   };
 }

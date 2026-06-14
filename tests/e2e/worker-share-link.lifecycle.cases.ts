@@ -1,10 +1,17 @@
 import { expect, test } from "@playwright/test";
-import { createSession, openReceiver, TEST_FILES } from "./p2p-file-v1.support";
+import {
+  createSession,
+  openReceiver,
+  pauseFallbackAfterFiles,
+  TEST_FILES,
+} from "./p2p-file-v1.support";
 import {
   createSessionViaApi,
+  installSenderSocketControl,
   observeApiRequests,
   observeWebSockets,
   writeEvidence,
+  writeEvidenceScreenshot,
 } from "./worker-share-link.support";
 
 test("Worker Receiver Token claim shows occupied notice, supports re-entry, and release reopens", async ({
@@ -74,6 +81,66 @@ test("Worker Receiver Token claim shows occupied notice, supports re-entry, and 
   }
 });
 
+test("Worker accidental sender interruption shows recoverable reconnecting guidance", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const apiRequests: string[] = [];
+  const websocketRequests: string[] = [];
+  observeApiRequests(page, apiRequests);
+  observeWebSockets(page, websocketRequests);
+  await installSenderSocketControl(page);
+  await pauseFallbackAfterFiles(page, 1);
+
+  const shareLink = await createSession(page, TEST_FILES, { fallback: false });
+  const receiver = await page.context().newPage();
+  observeApiRequests(receiver, apiRequests);
+  observeWebSockets(receiver, websocketRequests);
+
+  try {
+    await openReceiver(receiver, shareLink, TEST_FILES, { fallback: false });
+    await receiver.getByTestId("claim-session-button").click();
+    await expect(receiver.getByRole("button", { name: "放弃接收" })).toBeVisible();
+    await expect(receiver.getByTestId("file-state-local-1")).toContainText("completed", {
+      timeout: 15_000,
+    });
+
+    await page.evaluate(() =>
+      (
+        window as unknown as { __P2PFILE_CLOSE_SENDER_SIGNAL__: () => void }
+      ).__P2PFILE_CLOSE_SENDER_SIGNAL__(),
+    );
+
+    const reconnectingNoticeText = await receiver
+      .waitForFunction(
+        () =>
+          document.querySelector('[data-testid="reconnecting-session-notice"]')?.textContent ??
+          false,
+        undefined,
+        { timeout: 15_000 },
+      )
+      .then((handle) => handle.jsonValue() as Promise<string>);
+    expect(reconnectingNoticeText).toContain("Waiting for peer reconnect");
+    await expect(receiver.getByTestId("ended-session-notice")).toHaveCount(0);
+    const receiverStatus = await receiver.getByTestId("session-status").textContent();
+    const screenshotPath = await writeEvidenceScreenshot(receiver, "val-rel-001-reconnecting.png");
+    await writeEvidence("val-rel-001-dom-trace.json", {
+      assertionId: "VAL-REL-001",
+      workUnitId: "wu-fba92724",
+      evidenceSource: "controlled",
+      shareLink,
+      apiRequests,
+      websocketRequests: websocketRequests.filter((url) => url.includes("/ws/")),
+      receiverStatus,
+      reconnectingNotice: reconnectingNoticeText,
+      endedNoticeCount: await receiver.getByTestId("ended-session-notice").count(),
+      screenshotPath,
+    });
+  } finally {
+    await receiver.close();
+  }
+});
+
 test("Worker sender exit creates Sender-Ended Session with rebuild-only receiver UI", async ({
   page,
 }) => {
@@ -81,6 +148,7 @@ test("Worker sender exit creates Sender-Ended Session with rebuild-only receiver
   const websocketRequests: string[] = [];
   observeApiRequests(page, apiRequests);
   observeWebSockets(page, websocketRequests);
+  await pauseFallbackAfterFiles(page, 1);
 
   const shareLink = await createSession(page, TEST_FILES, { fallback: false });
   const senderOrigin = new URL(page.url()).origin;
@@ -92,6 +160,9 @@ test("Worker sender exit creates Sender-Ended Session with rebuild-only receiver
     await openReceiver(receiver, shareLink, TEST_FILES, { fallback: false });
     await receiver.getByTestId("claim-session-button").click();
     await expect(receiver.getByRole("button", { name: "放弃接收" })).toBeVisible();
+    await expect(receiver.getByTestId("file-state-local-1")).toContainText("completed", {
+      timeout: 15_000,
+    });
 
     await page.getByRole("button", { name: "结束会话" }).click();
 

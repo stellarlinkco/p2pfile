@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { resumeProgressFromManifest } from "@p2pfile/shared";
 import { createApp } from "./app";
 import { LiveSessionStore } from "./runtime";
 
@@ -79,7 +80,13 @@ test("active signaling moves claimed sessions through connecting and transferrin
     created.sessionId,
     "receiver",
     claim.receiverToken,
-    JSON.stringify({ type: "receiver-ready", payload: { completedFiles: 0 } }),
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 0,
+        progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+      },
+    }),
   );
   const transferring = store.getPublicSession(created.sessionId);
   expect(ready).toBe(true);

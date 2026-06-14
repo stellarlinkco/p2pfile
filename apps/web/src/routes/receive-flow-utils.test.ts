@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { SessionPublicView } from "../lib/api";
 import {
+  progressFromCommitted,
   receiverStageFromClaim,
   receiverStageFromSession,
   sessionIdFromEntry,
@@ -47,6 +48,22 @@ test("failed session view routes visitors to the retry-exhausted stage", () => {
   expect(receiverStageFromSession(failedSession)).toBe("retry-exhausted");
 });
 
+test("recoverable sender reconnecting session routes to reconnecting guidance", () => {
+  expect(
+    receiverStageFromSession({
+      ...failedSession,
+      canClaim: false,
+      claimed: true,
+      ended: false,
+      expiresAt: Date.now() + 30_000,
+      failureReason: undefined,
+      retriesRemaining: 2,
+      state: "reconnecting",
+      status: "reconnecting",
+    }),
+  ).toBe("reconnecting");
+});
+
 test("completed claim without local files routes to completion notice", () => {
   const stage = receiverStageFromClaim({
     claim: "completed",
@@ -80,6 +97,40 @@ test("completed claim without local files routes to completion notice", () => {
   });
 
   expect(stage).toBe("completion-notice");
+});
+
+test("per-file progress exposes queued completed and reconnecting states", () => {
+  const session: SessionPublicView = {
+    ...failedSession,
+    files: [
+      { id: "file-1", name: "done.txt", size: 5 },
+      { id: "file-2", name: "partial.zip", size: 64 * 1024 * 4 },
+      { id: "file-3", name: "queued.bin", size: 7 },
+    ],
+    manifest: [
+      { id: "file-1", name: "done.txt", size: 5 },
+      { id: "file-2", name: "partial.zip", size: 64 * 1024 * 4 },
+      { id: "file-3", name: "queued.bin", size: 7 },
+    ],
+    summary: { fileCount: 3, totalSize: 64 * 1024 * 4 + 12 },
+    totalBytes: 64 * 1024 * 4 + 12,
+  };
+
+  const progress = progressFromCommitted(
+    session,
+    new Map([
+      ["file-1", 5],
+      ["file-2", 64 * 1024],
+    ]),
+  );
+
+  expect(progress.fileId).toBe("file-2");
+  expect(progress.completedFiles).toBe(1);
+  expect(progress.files?.map((file) => [file.fileId, file.state])).toEqual([
+    ["file-1", "completed"],
+    ["file-2", "reconnecting"],
+    ["file-3", "queued"],
+  ]);
 });
 
 test("malformed percent escapes do not throw while parsing receiver entries", () => {

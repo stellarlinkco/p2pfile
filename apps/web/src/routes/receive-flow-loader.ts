@@ -5,11 +5,13 @@ import { readReceiverToken } from "../lib/session-storage";
 import type { ReceivedFile, TransferProgress } from "../lib/transfer";
 import {
   initialProgress,
+  progressFromCommitted,
+  RECONNECTING_STATUS,
   RETRY_EXHAUSTED_STATUS,
   type ReceiverStage,
   receiverStageFromSession,
 } from "./receive-flow-utils";
-import { readCachedReceivedFiles } from "./received-file-cache";
+import { readCachedActiveReceiveProgress, readCachedReceivedFiles } from "./received-file-cache";
 
 export type ReceiveSessionLoaderContext = {
   navigate: (to: string, options: { replace: boolean }) => void;
@@ -28,7 +30,21 @@ const MANIFEST_LOADED_STATUS = "Frozen Manifest 已载入。点击“接收全�
 function applySessionStage(context: ReceiveSessionLoaderContext, session: SessionPublicView) {
   const stage = receiverStageFromSession(session);
   context.setStage(stage);
-  context.setStatus(stage === "retry-exhausted" ? RETRY_EXHAUSTED_STATUS : MANIFEST_LOADED_STATUS);
+  context.setStatus(
+    stage === "retry-exhausted"
+      ? RETRY_EXHAUSTED_STATUS
+      : stage === "reconnecting"
+        ? RECONNECTING_STATUS
+        : MANIFEST_LOADED_STATUS,
+  );
+}
+
+async function progressForLoadedSession(sessionId: string, session: SessionPublicView) {
+  const committedBytesByFileId = readCachedActiveReceiveProgress(sessionId, session.files);
+  for (const file of await readCachedReceivedFiles(sessionId, session.files)) {
+    committedBytesByFileId.set(file.id, file.size);
+  }
+  return progressFromCommitted(session, committedBytesByFileId);
 }
 
 export async function loadReceiverSession(
@@ -59,17 +75,17 @@ export async function loadReceiverSession(
         context.setStage("completion-notice");
         context.setStatus("Completion Notice：该会话已完成；如需重新接收，请让发送方重新创建。");
       }
-    } else if (nextSession.status === "claimed") {
+    } else if (nextSession.status === "claimed" || nextSession.status === "reconnecting") {
       const claimed = await claimSession(sessionId, receiverToken);
       if (claimed.claim === "occupied") {
         context.setSession(claimed.session);
-        context.setProgress(initialProgress(claimed.session));
+        context.setProgress(await progressForLoadedSession(sessionId, claimed.session));
         context.setMode(claimed.session.transferMode);
         context.setStage("occupied");
         context.setStatus("Occupied Session Notice：已有另一个接收方 claim 了该会话。");
       } else {
         context.setSession(claimed.session);
-        context.setProgress(initialProgress(claimed.session));
+        context.setProgress(await progressForLoadedSession(sessionId, claimed.session));
         context.setMode(claimed.session.transferMode);
         if (claimed.claim === "claimed") {
           context.setRetriesRemaining(claimed.retriesRemaining);
@@ -78,7 +94,7 @@ export async function loadReceiverSession(
       }
     } else {
       context.setSession(nextSession);
-      context.setProgress(initialProgress(nextSession));
+      context.setProgress(await progressForLoadedSession(sessionId, nextSession));
       context.setMode(nextSession.transferMode);
       applySessionStage(context, nextSession);
     }

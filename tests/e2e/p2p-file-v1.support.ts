@@ -69,6 +69,31 @@ export async function forceDirectFail(page: Page) {
     });
   });
 }
+export async function slowDirectChunks(page: Page, delayMs: number) {
+  await page.addInitScript((value) => {
+    Object.defineProperty(window, "__P2PFILE_TEST_CHUNK_DELAY_MS__", {
+      configurable: true,
+      value,
+    });
+  }, delayMs);
+}
+export async function recordTransferEvents(page: Page) {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "__P2PFILE_TEST_TRANSFER_EVENTS__", {
+      configurable: true,
+      value: [],
+    });
+  });
+}
+
+export async function corruptFirstFallbackChunkDigest(page: Page) {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "__P2PFILE_TEST_BAD_CHUNK_DIGEST__", {
+      configurable: true,
+      value: true,
+    });
+  });
+}
 
 export async function blockFallbackSignals(page: Page) {
   await page.addInitScript(() => {
@@ -185,7 +210,6 @@ export async function openReceiver(
   await page.goto(shareLink);
 
   const manifest = page.getByTestId("receiver-manifest");
-  await expect(manifest).not.toContainText(/sending|queued/i);
   await expect(manifest).toBeVisible();
   for (const file of files) {
     await expect(manifest).toContainText(file.name);

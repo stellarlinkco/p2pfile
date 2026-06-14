@@ -7,7 +7,7 @@ import {
   formatRelativeTime,
   formatSpeed,
 } from "../lib/format";
-import type { TransferProgress } from "../lib/transfer";
+import type { TransferFileProgress, TransferProgress } from "../lib/transfer";
 
 const panelClass = "min-w-0 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm";
 
@@ -124,6 +124,7 @@ export function ManifestPanel({
   title,
   caption,
   showStatus = true,
+  fileProgress,
 }: ManifestPanelProps) {
   return (
     <section className={panelClass}>
@@ -166,8 +167,11 @@ export function ManifestPanel({
             <span>仅元数据</span>
             <span className="tabular-nums">{formatBytes(file.size)}</span>
             {showStatus ? (
-              <span className="w-fit rounded-full bg-teal-50 px-3 py-1 font-medium text-teal-700">
-                就绪
+              <span
+                className="w-fit rounded-full bg-teal-50 px-3 py-1 font-medium text-teal-700"
+                data-testid={`file-state-${file.id}`}
+              >
+                {fileProgress?.find((progress) => progress.fileId === file.id)?.state ?? "queued"}
               </span>
             ) : null}
           </div>
@@ -183,6 +187,7 @@ type ManifestPanelProps = {
   title: string;
   caption: string;
   showStatus?: boolean;
+  fileProgress?: TransferFileProgress[];
 };
 
 export function ModeDisclosure({ mode }: { mode: TransferMode | null }) {

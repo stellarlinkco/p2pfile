@@ -1,6 +1,29 @@
 import type { RelayProtocolMessage, TransferProtocolMessage } from "./types";
 
-function encodeChunk(buffer: ArrayBuffer) {
+export const CLOUDFLARE_WEBSOCKET_MESSAGE_LIMIT_BYTES = 32 * 1024 * 1024;
+
+type RelayEnvelope = {
+  type: "relay-message";
+  payload: {
+    sequence: number;
+    message: RelayProtocolMessage;
+  };
+};
+
+export function relayEnvelopeSizeBytes(envelope: RelayEnvelope) {
+  return new TextEncoder().encode(JSON.stringify(envelope)).byteLength;
+}
+
+export function assertRelayEnvelopeFitsCloudflareLimit(
+  envelope: RelayEnvelope,
+  limitBytes = CLOUDFLARE_WEBSOCKET_MESSAGE_LIMIT_BYTES,
+) {
+  if (relayEnvelopeSizeBytes(envelope) >= limitBytes) {
+    throw new Error("Relay message exceeds Cloudflare WebSocket receive limit.");
+  }
+}
+
+export function encodeChunk(buffer: ArrayBuffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
   for (const byte of bytes) {
@@ -9,7 +32,7 @@ function encodeChunk(buffer: ArrayBuffer) {
   return btoa(binary);
 }
 
-function decodeChunk(bytesBase64: string) {
+export function decodeChunk(bytesBase64: string) {
   const binary = atob(bytesBase64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
@@ -26,7 +49,10 @@ export function toRelayMessage(message: TransferProtocolMessage): RelayProtocolM
   return {
     type: "chunk",
     fileId: message.fileId,
+    chunkIndex: message.chunkIndex,
+    offset: message.offset,
     bytesBase64: encodeChunk(message.bytes),
+    chunkDigest: message.chunkDigest,
   };
 }
 
@@ -38,6 +64,9 @@ export function fromRelayMessage(message: RelayProtocolMessage): TransferProtoco
   return {
     type: "chunk",
     fileId: message.fileId,
+    chunkIndex: message.chunkIndex,
+    offset: message.offset,
     bytes: decodeChunk(message.bytesBase64),
+    chunkDigest: message.chunkDigest,
   };
 }

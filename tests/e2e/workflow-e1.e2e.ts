@@ -37,30 +37,43 @@ test.describe("workflow E1 browser proofs", () => {
     try {
       await openReceiver(receiver, shareLink);
       await receiver.getByTestId("claim-session-button").click();
-      for (let reclaim = 0; reclaim < 5; reclaim += 1) {
-        await receiver.reload();
-        await expect
-          .poll(async () => {
-            const exhausted = await receiver
-              .getByTestId("retry-exhausted-notice")
-              .isVisible()
-              .catch(() => false);
-            const claim = await receiver
-              .getByTestId("claim-session-button")
-              .isVisible()
-              .catch(() => false);
-            return exhausted || claim;
-          })
-          .toBe(true);
-        if (
-          await receiver
-            .getByTestId("retry-exhausted-notice")
-            .isVisible()
-            .catch(() => false)
-        ) {
-          break;
-        }
-      }
+      const sessionId = new URL(shareLink).pathname.split("/").pop();
+      if (!sessionId) throw new Error("Share Link is missing a session id.");
+
+      await expect
+        .poll(() =>
+          receiver.evaluate((id) => localStorage.getItem(`p2pfile:receiver:${id}`), sessionId),
+        )
+        .not.toBeNull();
+      const receiverToken = await receiver.evaluate(
+        (id) => localStorage.getItem(`p2pfile:receiver:${id}`),
+        sessionId,
+      );
+      if (!receiverToken) throw new Error("Receiver Token was not cached after claim.");
+
+      const exhaustedClaim = await receiver.evaluate(
+        async ({ sessionId, receiverToken }) => {
+          const origin = new URL(window.location.origin);
+          if (origin.port === "4173") origin.port = "3001";
+
+          let claim = "";
+          for (let attempt = 0; attempt < 5 && claim !== "failed"; attempt += 1) {
+            const response = await fetch(`${origin.origin}/api/sessions/${sessionId}/claim`, {
+              body: JSON.stringify({ receiverToken }),
+              headers: { "content-type": "application/json" },
+              method: "POST",
+            });
+            if (!response.ok) throw new Error(`Retry claim failed with ${response.status}.`);
+            const payload = (await response.json()) as { claim?: string; status?: string };
+            claim = payload.claim ?? payload.status ?? "";
+          }
+          return claim;
+        },
+        { sessionId, receiverToken },
+      );
+      expect(exhaustedClaim).toBe("failed");
+
+      await receiver.reload();
 
       await expect(receiver.getByTestId("retry-exhausted-notice")).toBeVisible();
       await expect(receiver.getByTestId("retry-exhausted-notice")).toContainText(/重新创建/);

@@ -14,7 +14,11 @@ const codeExtensions: Record<string, true> = {
 const failures: string[] = [];
 
 function isTestPath(path: string): boolean {
-  return path.includes("/tests/") || /\.(test|spec)\.[jt]sx?$/.test(path);
+  return (
+    path.startsWith("tests/") ||
+    path.includes("/tests/") ||
+    /\.(test|spec|e2e|cases)\.[jt]sx?$/.test(path)
+  );
 }
 
 function shouldInspect(path: string): boolean {

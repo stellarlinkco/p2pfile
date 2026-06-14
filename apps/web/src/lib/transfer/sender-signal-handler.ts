@@ -1,6 +1,7 @@
 import type { RelayMessageQueue } from "./relay-queue";
-import { applyMode, parseSignalMessage } from "./runtime-shared";
-import type { SenderRuntimeHandlers } from "./types";
+import { fromRelayMessage } from "./relay-runtime";
+import { applyMode, parseSignalMessage, sendSignal } from "./runtime-shared";
+import type { BrowserSignalMessage, SenderRuntimeHandlers } from "./types";
 
 type SenderSignalHandlerContext = {
   ws: WebSocket;
@@ -8,7 +9,9 @@ type SenderSignalHandlerContext = {
   handlers: SenderRuntimeHandlers;
   isStopped: () => boolean;
   getPeerConnection: () => RTCPeerConnection | null;
-  handleReceiverReady: (completedFiles: number) => void;
+  handleReceiverReady: (
+    payload: Extract<BrowserSignalMessage, { type: "receiver-ready" }>["payload"],
+  ) => void;
   markDirectFailed: () => void;
   continueFallback: () => void;
   stopRelayMode: () => void;
@@ -20,7 +23,7 @@ export function attachSenderSignalHandler(context: SenderSignalHandlerContext): 
     const message = parseSignalMessage(event);
     if (!message || context.isStopped()) return;
     if (message.type === "receiver-ready") {
-      context.handleReceiverReady(message.payload.completedFiles);
+      context.handleReceiverReady(message.payload);
       return;
     }
     if (message.type === "answer") {
@@ -56,6 +59,17 @@ export function attachSenderSignalHandler(context: SenderSignalHandlerContext): 
     if (message.type === "relay-ready") {
       context.markDirectFailed();
       context.continueFallback();
+      return;
+    }
+    if (message.type === "relay-message") {
+      sendSignal(context.ws, {
+        type: "relay-ack",
+        payload: { sequence: message.payload.sequence },
+      });
+      const transferMessage = fromRelayMessage(message.payload.message);
+      if (transferMessage.type === "chunk-commit") {
+        context.queue.commit(transferMessage);
+      }
       return;
     }
     if (message.type === "relay-ack") {

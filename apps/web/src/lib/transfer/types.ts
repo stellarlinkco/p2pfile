@@ -1,19 +1,45 @@
-import type { FileManifestItem, TransferMode } from "@p2pfile/shared";
+import type { FileManifestItem, ResumeProgress, TransferMode } from "@p2pfile/shared";
 import type { SignalRole } from "../api";
 
 export type TransferProtocolMessage =
-  | { type: "manifest"; files: FileManifestItem[]; totalBytes: number }
-  | { type: "file-start"; file: FileManifestItem }
-  | { type: "chunk"; fileId: string; bytes: ArrayBuffer }
+  | { type: "manifest"; files: FileManifestItem[]; totalBytes: number; manifestHash: string }
+  | { type: "file-start"; file: FileManifestItem; offset: number }
+  | {
+      type: "chunk";
+      fileId: string;
+      chunkIndex: number;
+      offset: number;
+      bytes: ArrayBuffer;
+      chunkDigest: string;
+    }
+  | { type: "chunk-commit"; fileId: string; chunkIndex: number; committedBytes: number }
   | { type: "file-end"; fileId: string; bytes: number; digest: string }
   | { type: "complete"; totalBytes: number };
 
 export type RelayProtocolMessage =
-  | { type: "manifest"; files: FileManifestItem[]; totalBytes: number }
-  | { type: "file-start"; file: FileManifestItem }
-  | { type: "chunk"; fileId: string; bytesBase64: string }
+  | { type: "manifest"; files: FileManifestItem[]; totalBytes: number; manifestHash: string }
+  | { type: "file-start"; file: FileManifestItem; offset: number }
+  | {
+      type: "chunk";
+      fileId: string;
+      chunkIndex: number;
+      offset: number;
+      bytesBase64: string;
+      chunkDigest: string;
+    }
+  | { type: "chunk-commit"; fileId: string; chunkIndex: number; committedBytes: number }
   | { type: "file-end"; fileId: string; bytes: number; digest: string }
   | { type: "complete"; totalBytes: number };
+
+export type TransferFileState = "queued" | "receiving" | "reconnecting" | "completed" | "failed";
+
+export type TransferFileProgress = {
+  fileId: string;
+  fileName: string;
+  fileBytes: number;
+  fileTotalBytes: number;
+  state: TransferFileState;
+};
 
 export type TransferProgress = {
   fileId: string | null;
@@ -24,6 +50,7 @@ export type TransferProgress = {
   totalBytes: number;
   completedFiles: number;
   totalFiles: number;
+  files?: TransferFileProgress[];
 };
 
 export type SenderRuntimeHandlers = {
@@ -52,11 +79,15 @@ export type BrowserSignalMessage =
   | { type: "answer"; payload: RTCSessionDescriptionInit }
   | { type: "ice-candidate"; payload: RTCIceCandidateInit }
   | { type: "mode"; payload: { mode: TransferMode } }
-  | { type: "receiver-ready"; payload: { completedFiles: number } }
+  | {
+      type: "receiver-ready";
+      payload: { progress: ResumeProgress; completedFiles?: number; receiverInstanceId?: string };
+    }
   | { type: "relay-ready"; payload: Record<string, never> }
   | { type: "relay-message"; payload: { sequence: number; message: RelayProtocolMessage } }
   | { type: "relay-ack"; payload: { sequence: number } }
   | { type: "transfer-complete"; payload: { completedAt?: number } }
+  | { type: "sender-reconnecting"; payload: { reason?: string } }
   | { type: "sender-left"; payload: Record<string, never> };
 
 export type ForwardedSignalMessage = BrowserSignalMessage & {

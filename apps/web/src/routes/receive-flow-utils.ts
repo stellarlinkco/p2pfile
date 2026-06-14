@@ -1,7 +1,9 @@
 import type { ClaimSessionResponse, SessionPublicView } from "../lib/api";
-import type { ReceivedFile, TransferProgress } from "../lib/transfer";
+import type { ReceivedFile, TransferFileProgress, TransferProgress } from "../lib/transfer";
 
 export const RETRY_EXHAUSTED_STATUS = "Retry Budget 已用尽：请发送方重新创建会话。";
+export const RECONNECTING_STATUS =
+  "正在等待发送方重新连接：保留已完成文件，原 Receiver Token 可在同一 Share Link 继续。";
 
 export type ReceiverStage =
   | "entry"
@@ -14,8 +16,52 @@ export type ReceiverStage =
   | "completed"
   | "completion-notice"
   | "ended"
+  | "reconnecting"
   | "retry-exhausted"
   | "failed";
+
+function fileProgressFromSession(
+  session: SessionPublicView | null,
+  committedBytesByFileId: ReadonlyMap<string, number>,
+) {
+  return (session?.files ?? []).map((file) => {
+    const committedBytes = Math.max(
+      0,
+      Math.min(committedBytesByFileId.get(file.id) ?? 0, file.size),
+    );
+    return {
+      fileId: file.id,
+      fileName: file.name,
+      fileBytes: committedBytes,
+      fileTotalBytes: file.size,
+      state:
+        committedBytes === file.size && (file.size > 0 || committedBytesByFileId.has(file.id))
+          ? "completed"
+          : committedBytes > 0
+            ? "reconnecting"
+            : "queued",
+    } satisfies TransferFileProgress;
+  });
+}
+
+export function progressFromCommitted(
+  session: SessionPublicView | null,
+  committedBytesByFileId: ReadonlyMap<string, number>,
+): TransferProgress {
+  const files = fileProgressFromSession(session, committedBytesByFileId);
+  const nextFile = files.find((file) => file.state !== "completed") ?? null;
+  return {
+    fileId: nextFile?.fileId ?? null,
+    fileName: nextFile?.fileName ?? null,
+    fileBytes: nextFile?.fileBytes ?? 0,
+    fileTotalBytes: nextFile?.fileTotalBytes ?? 0,
+    completedBytes: files.reduce((sum, file) => sum + file.fileBytes, 0),
+    totalBytes: session?.totalBytes ?? 0,
+    completedFiles: files.filter((file) => file.state === "completed").length,
+    totalFiles: files.length,
+    files,
+  };
+}
 
 export function initialProgress(
   session: SessionPublicView | null,
@@ -23,21 +69,10 @@ export function initialProgress(
 ): TransferProgress {
   const files = session?.files ?? [];
   const boundedCompletedFiles = Math.max(0, Math.min(completedFiles, files.length));
-  const completedBytes = files
-    .slice(0, boundedCompletedFiles)
-    .reduce((sum, file) => sum + file.size, 0);
-  const nextFile = files[boundedCompletedFiles] ?? null;
-
-  return {
-    fileId: nextFile?.id ?? null,
-    fileName: nextFile?.name ?? null,
-    fileBytes: 0,
-    fileTotalBytes: nextFile?.size ?? 0,
-    completedBytes,
-    totalBytes: session?.totalBytes ?? 0,
-    completedFiles: boundedCompletedFiles,
-    totalFiles: files.length,
-  };
+  return progressFromCommitted(
+    session,
+    new Map(files.slice(0, boundedCompletedFiles).map((file) => [file.id, file.size])),
+  );
 }
 
 function decodeEntrySegment(segment: string) {
@@ -90,6 +125,10 @@ export function receiverStageFromClaim(response: ClaimSessionResponse): Receiver
     return "retry-exhausted";
   }
 
+  if (response.session.status === "reconnecting") {
+    return "reconnecting";
+  }
+
   return "connecting";
 }
 
@@ -104,6 +143,10 @@ export function receiverStageFromSession(session: SessionPublicView): ReceiverSt
 
   if (session.status === "completed-view") {
     return "completion-notice";
+  }
+
+  if (session.status === "reconnecting") {
+    return "reconnecting";
   }
 
   return "manifest";

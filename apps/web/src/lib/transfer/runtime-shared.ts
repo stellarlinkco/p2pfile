@@ -1,4 +1,6 @@
 import type { TransferMode } from "@p2pfile/shared";
+import { MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
+import { decodeChunk, encodeChunk } from "./relay-runtime";
 import type {
   BrowserSignalMessage,
   ForwardedSignalMessage,
@@ -7,7 +9,7 @@ import type {
   TransferProtocolMessage,
 } from "./types";
 
-const CHUNK_BYTES = 64 * 1024;
+const CHUNK_BYTES = MANIFEST_CHUNK_BYTES;
 
 function configuredTurnUrl() {
   const turnUrl = import.meta.env?.VITE_TURN_URL;
@@ -149,10 +151,15 @@ export function sendDataChannelPayload(channel: RTCDataChannel, data: string | A
   }
 }
 
-export function sendProtocolMessage(
-  channel: RTCDataChannel,
-  message: Exclude<TransferProtocolMessage, { type: "chunk" }>,
-) {
+export function sendProtocolMessage(channel: RTCDataChannel, message: TransferProtocolMessage) {
+  if (message.type === "chunk") {
+    sendDataChannelPayload(
+      channel,
+      JSON.stringify({ ...message, bytesBase64: encodeChunk(message.bytes), bytes: undefined }),
+    );
+    return;
+  }
+
   sendDataChannelPayload(channel, JSON.stringify(message));
 }
 
@@ -170,7 +177,13 @@ export function parseSignalMessage(raw: MessageEvent<string>) {
 
 export function parseProtocolMessage(data: string) {
   try {
-    return JSON.parse(data) as TransferProtocolMessage;
+    const parsed = JSON.parse(data) as
+      | TransferProtocolMessage
+      | (Omit<TransferProtocolMessage & { type: "chunk" }, "bytes"> & { bytesBase64: string });
+    if (parsed.type === "chunk" && "bytesBase64" in parsed) {
+      return { ...parsed, bytes: decodeChunk(parsed.bytesBase64) } as TransferProtocolMessage;
+    }
+    return parsed as TransferProtocolMessage;
   } catch {
     return null;
   }
