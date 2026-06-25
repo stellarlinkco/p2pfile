@@ -162,7 +162,116 @@ test("accidental sender websocket close enters reconnect grace and allows origin
   expect(retryClaimBody.status).toBe("claimed");
   if (retryClaimBody.status !== "claimed") throw new Error("expected claimed status");
   expect(retryClaimBody.receiverToken).toBe(claim.receiverToken);
+  expect(retryClaimBody.session.state).toBe("transferring");
 });
+
+test("preemptive sender websocket replacement notifies receiver without ending the session", async () => {
+  const env = createEnv(createDurableObjects());
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+  const claim = await claimReceiver(env, session.sessionId);
+
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+
+  const receiverPair = pairs[1];
+  if (!receiverPair) throw new Error("expected receiver socket");
+  receiverPair.client.received.length = 0;
+
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+
+  expect(receiverPair.client.received).toContainEqual(
+    JSON.stringify({ type: "sender-reconnecting", payload: { reason: "sender-disconnected" } }),
+  );
+
+  const view = await handleRequest(request(`/api/sessions/${session.sessionId}`), env);
+  const viewBody = SessionPublicViewSchema.parse(await view.json());
+  expect(viewBody.state).toBe("claimed");
+  expect(viewBody.ended).toBe(false);
+});
+
+test("sender close does not overwrite immediate sender reattach after storage yield", async () => {
+  const objects = createDurableObjects();
+  const env = createEnv(objects);
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+  const claim = await claimReceiver(env, session.sessionId);
+
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+
+  const storage = (
+    objects.SESSION_OBJECT as unknown as MemoryDurableObjectNamespace<SessionDurableObject>
+  ).storageForName(session.sessionId);
+  const originalGet = storage.get.bind(storage);
+  let releaseRead = () => undefined;
+  let shouldDelay = true;
+  storage.get = (<T>(key: string): Promise<T | undefined> => {
+    if (!shouldDelay) return originalGet<T>(key);
+    shouldDelay = false;
+    return new Promise<T | undefined>((resolve) => {
+      releaseRead = () => {
+        void originalGet<T>(key).then((value) => resolve(value));
+      };
+    });
+  }) as typeof storage.get;
+
+  const senderPair = pairs[0];
+  if (!senderPair) throw new Error("expected sender socket");
+  senderPair.client.close(1000, "sender tab closed");
+
+  const reattach = await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+    env,
+  );
+  expect(reattach.status).toBe(101);
+  releaseRead();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const view = await handleRequest(request(`/api/sessions/${session.sessionId}`), env);
+  const viewBody = SessionPublicViewSchema.parse(await view.json());
+  expect(viewBody.state).not.toBe("reconnecting");
+  resetEdgeSessionsForTests();
+});
+
 test("accidental sender websocket close after claim preserves Receiver Token re-entry", async () => {
   const env = createEnv(createDurableObjects());
   const pairs = installFakeWebSocketPair();

@@ -1,9 +1,13 @@
 import type { StoredSession } from "./session-model";
 
-const ACTIVE_SESSION_STATE: Record<"claimed" | "connecting" | "transferring", true> = {
+const ACTIVE_SESSION_STATE: Record<
+  "claimed" | "connecting" | "transferring" | "reconnecting",
+  true
+> = {
   claimed: true,
   connecting: true,
   transferring: true,
+  reconnecting: true,
 };
 
 export const isActiveSessionState = (state: StoredSession["state"]) =>

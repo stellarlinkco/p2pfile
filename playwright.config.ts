@@ -1,5 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const webPort = process.env.P2PFILE_E2E_WEB_PORT ?? "4173";
+const webOrigin = `http://127.0.0.1:${webPort}`;
+const signalOrigin = process.env.P2PFILE_E2E_SIGNAL_ORIGIN ?? "http://127.0.0.1:3001";
+const useCustomWebPort = webPort !== "4173";
+
 export default defineConfig({
   testDir: "./tests/e2e",
   testMatch: /.*\.e2e\.ts/,
@@ -8,21 +13,26 @@ export default defineConfig({
   workers: 1,
   retries: process.env.CI ? 1 : 0,
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: webOrigin,
     trace: "on-first-retry",
   },
   webServer: [
     {
       command: "bun run --filter @p2pfile/signal dev",
-      url: "http://127.0.0.1:3001/api/status",
+      url: `${signalOrigin}/api/status`,
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
     {
-      command: "bun run --filter @p2pfile/web dev",
-      url: "http://127.0.0.1:4173",
-      reuseExistingServer: !process.env.CI,
+      command: `bun run --filter @p2pfile/web dev -- --port ${webPort}`,
+      url: webOrigin,
+      reuseExistingServer: false,
       timeout: 120_000,
+      env: useCustomWebPort
+        ? {
+            VITE_SIGNAL_ORIGIN: signalOrigin,
+          }
+        : undefined,
     },
   ],
   projects: [

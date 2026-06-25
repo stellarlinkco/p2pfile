@@ -22,7 +22,15 @@ export class RedisSocketRegistry {
   }
 
   clear(sessionId: string) {
+    const sessionSockets = this.sockets.get(sessionId);
+    sessionSockets?.sender?.close(1000, "session closed");
+    sessionSockets?.receiver?.close(1000, "session closed");
     this.sockets.delete(sessionId);
+  }
+
+  get(sessionId: string) {
+    const sessionSockets = this.sockets.get(sessionId);
+    return sessionSockets ? { ...sessionSockets } : undefined;
   }
 
   sendToPeer(sessionId: string, fromRole: SessionRole, envelope: SignalEnvelope) {

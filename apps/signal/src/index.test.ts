@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { resumeProgressFromManifest } from "@p2pfile/shared";
 import { createApp } from "./app";
 import { LiveSessionStore } from "./runtime";
 
@@ -166,6 +167,98 @@ test("stale sender websocket close does not end replacement connection", () => {
   expect(store.getPublicSession(created.sessionId)?.state).toBe("waiting");
 });
 
+test("transferring sender websocket disconnect enters reconnecting instead of ended", () => {
+  const store = new LiveSessionStore();
+  const created = store.createSession({
+    manifest: [{ id: "file-1", name: "large.zip", size: 1024 * 1024 + 1 }],
+  });
+  const claim = store.claimSession(created.sessionId);
+  if (claim?.status !== "claimed") {
+    throw new Error("expected claimed");
+  }
+  const senderSocket = { send() {} };
+  const receiverSocket = {
+    sent: [] as unknown[],
+    send(payload: string) {
+      this.sent.push(JSON.parse(payload));
+    },
+  };
+  store.connectSocket(created.sessionId, "sender", created.senderToken, senderSocket as never);
+  store.connectSocket(created.sessionId, "receiver", claim.receiverToken, receiverSocket as never);
+  store.handleSignal(
+    created.sessionId,
+    "sender",
+    created.senderToken,
+    JSON.stringify({ type: "offer", payload: { type: "offer", sdp: "v=0" } }),
+  );
+  store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claim.receiverToken,
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 0,
+        progress: resumeProgressFromManifest([
+          { id: "file-1", name: "large.zip", size: 1024 * 1024 + 1 },
+        ]),
+      },
+    }),
+  );
+
+  store.disconnectSocket(created.sessionId, "sender", created.senderToken, senderSocket as never);
+
+  const session = store.getPublicSession(created.sessionId);
+  expect(session?.state).toBe("reconnecting");
+  expect(session?.ended).toBe(false);
+  expect(receiverSocket.sent).toContainEqual({
+    type: "sender-reconnecting",
+    payload: { reason: "sender-disconnected" },
+  });
+});
+
+test("reconnecting sender reconnect restores transferring when receiver is claimed", () => {
+  const store = new LiveSessionStore();
+  const created = store.createSession({
+    manifest: [{ id: "file-1", name: "large.zip", size: 1024 * 1024 + 1 }],
+  });
+  const claim = store.claimSession(created.sessionId);
+  if (claim?.status !== "claimed") {
+    throw new Error("expected claimed");
+  }
+  const senderSocket = { send() {} };
+  const receiverSocket = { send() {} };
+  store.connectSocket(created.sessionId, "sender", created.senderToken, senderSocket as never);
+  store.connectSocket(created.sessionId, "receiver", claim.receiverToken, receiverSocket as never);
+  store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claim.receiverToken,
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 0,
+        progress: resumeProgressFromManifest([
+          { id: "file-1", name: "large.zip", size: 1024 * 1024 + 1 },
+        ]),
+      },
+    }),
+  );
+
+  store.disconnectSocket(created.sessionId, "sender", created.senderToken, senderSocket as never);
+  expect(store.getPublicSession(created.sessionId)?.state).toBe("reconnecting");
+
+  const replacementSenderSocket = { send() {} };
+  store.connectSocket(
+    created.sessionId,
+    "sender",
+    created.senderToken,
+    replacementSenderSocket as never,
+  );
+
+  expect(store.getPublicSession(created.sessionId)?.state).toBe("transferring");
+});
+
 test("receiver websocket cannot end session with sender-left", async () => {
   const store = new LiveSessionStore();
   const created = store.createSession({
@@ -181,6 +274,27 @@ test("receiver websocket cannot end session with sender-left", async () => {
     "receiver",
     claim.receiverToken,
     JSON.stringify({ type: "sender-left", payload: {} }),
+  );
+
+  expect(accepted).toBe(false);
+  expect(store.getPublicSession(created.sessionId)?.state).toBe("claimed");
+});
+
+test("client websocket cannot spoof sender-reconnecting", () => {
+  const store = new LiveSessionStore();
+  const created = store.createSession({
+    manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+  });
+  const claim = store.claimSession(created.sessionId);
+  if (claim?.status !== "claimed") {
+    throw new Error("expected claim");
+  }
+
+  const accepted = store.handleSignal(
+    created.sessionId,
+    "sender",
+    created.senderToken,
+    JSON.stringify({ type: "sender-reconnecting", payload: { reason: "spoofed" } }),
   );
 
   expect(accepted).toBe(false);

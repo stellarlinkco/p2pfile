@@ -13,11 +13,12 @@ export const toPublicSession = (session: StoredSession): SessionPublicView => {
     session.state !== "completed-view" &&
     session.state !== "ended" &&
     session.state !== "failed";
-  const expiresAt = preClaim
-    ? session.openExpiresAt
-    : session.state === "completed-view"
-      ? session.completedViewExpiresAt
-      : null;
+  const expiresAt =
+    preClaim || session.state === "reconnecting"
+      ? session.openExpiresAt
+      : session.state === "completed-view"
+        ? session.completedViewExpiresAt
+        : null;
 
   return {
     sessionId: session.id,

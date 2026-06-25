@@ -6,6 +6,7 @@ import type { ReceivedFile, ReceiverRuntime, TransferProgress } from "../lib/tra
 import { startReceiverRuntime } from "../lib/transfer";
 import { clearReceivedFiles, stopReceiverRuntime } from "./receive-flow-cleanup";
 import {
+  nextReceiverStageAfterProgress,
   progressFromCommitted,
   RECONNECTING_STATUS,
   RETRY_EXHAUSTED_STATUS,
@@ -194,7 +195,7 @@ export async function claimReceiverSession({
             return;
           }
           setProgress(nextProgress);
-          setStage((current) => (current === "completed" ? current : "receiving"));
+          setStage((current) => nextReceiverStageAfterProgress(current, runtimeFinished));
           cacheActiveReceiveProgress(
             session.sessionId,
             response.session.files,

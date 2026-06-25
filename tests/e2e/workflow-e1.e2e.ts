@@ -25,6 +25,8 @@ const RESUME_FILES: TestFile[] = [
 ];
 
 test.describe("workflow E1 browser proofs", () => {
+  const signalOrigin = process.env.P2PFILE_E2E_SIGNAL_ORIGIN ?? "http://127.0.0.1:3001";
+
   test("receiver retry budget exhaustion shows recreate guidance to original and later visitors", async ({
     page,
   }) => {
@@ -52,13 +54,10 @@ test.describe("workflow E1 browser proofs", () => {
       if (!receiverToken) throw new Error("Receiver Token was not cached after claim.");
 
       const exhaustedClaim = await receiver.evaluate(
-        async ({ sessionId, receiverToken }) => {
-          const origin = new URL(window.location.origin);
-          if (origin.port === "4173") origin.port = "3001";
-
+        async ({ sessionId, receiverToken, signalOrigin: signalBaseUrl }) => {
           let claim = "";
           for (let attempt = 0; attempt < 5 && claim !== "failed"; attempt += 1) {
-            const response = await fetch(`${origin.origin}/api/sessions/${sessionId}/claim`, {
+            const response = await fetch(`${signalBaseUrl}/api/sessions/${sessionId}/claim`, {
               body: JSON.stringify({ receiverToken }),
               headers: { "content-type": "application/json" },
               method: "POST",
@@ -69,7 +68,7 @@ test.describe("workflow E1 browser proofs", () => {
           }
           return claim;
         },
-        { sessionId, receiverToken },
+        { sessionId, receiverToken, signalOrigin },
       );
       expect(exhaustedClaim).toBe("failed");
 

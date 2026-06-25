@@ -266,6 +266,7 @@ export class SessionDurableObject implements DurableObject {
 
   private async markSenderReconnecting(session: SessionRecord) {
     const latest = (await readSession(this.state.storage)) ?? session;
+    if (this.sockets.sender) return;
     if (!isSenderLiveSession(latest) || latest.state === "reconnecting") return;
     latest.state = "reconnecting";
     this.sockets.receiver?.send(
@@ -289,13 +290,23 @@ export class SessionDurableObject implements DurableObject {
     server.accept();
 
     if (role === "sender" && session.state === "reconnecting") {
-      session.state = session.receiverToken ? "claimed" : "viewing";
-      session.openExpiresAt = session.receiverToken ? 0 : currentTime.now() + OPEN_SESSION_TTL_MS;
+      session.state = session.receiverToken ? "transferring" : "connecting";
       void this.persistSession(session);
     }
 
     const replaced = this.sockets[role];
     this.sockets[role] = server;
+    if (
+      role === "sender" &&
+      replaced &&
+      session.receiverToken &&
+      isActiveSession(session) &&
+      session.state !== "reconnecting"
+    ) {
+      this.sockets.receiver?.send(
+        JSON.stringify({ type: "sender-reconnecting", payload: { reason: "sender-disconnected" } }),
+      );
+    }
     replaced?.close(1000, "replaced");
     server.addEventListener("message", (event) => {
       void this.handleSignal(session, role, server, event);

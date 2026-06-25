@@ -135,6 +135,7 @@ class FakePeerConnection {
   static instances: FakePeerConnection[] = [];
   readonly config: RTCConfiguration;
   iceConnectionState: RTCIceConnectionState = "new";
+  connectionState: RTCPeerConnectionState = "new";
   iceGatheringState: RTCIceGatheringState = "complete";
   signalingState: RTCSignalingState = "stable";
   localDescription: RTCSessionDescription | null = null;
@@ -184,10 +185,12 @@ class FakePeerConnection {
   close() {
     this.closed = true;
     this.signalingState = "closed";
+    this.connectionState = "closed";
   }
 
   failIce() {
     this.iceConnectionState = "failed";
+    this.connectionState = "failed";
     for (const listener of this.listeners.get("iceconnectionstatechange") ?? []) {
       listener();
     }
@@ -427,6 +430,64 @@ test("accidental signal socket close reattaches sender with the same token", asy
     expect(secondSocket.url).toContain("/ws/session-reconnect/sender/sender-token");
     expect(FakePeerConnection.instances.length).toBeGreaterThanOrEqual(2);
 
+    runtime.stop();
+  });
+});
+test("signal socket close during an active direct large transfer keeps the data channel alive", async () => {
+  await withSenderHarness(undefined, async ({ handlers, socket, peer, settle }) => {
+    const file = new File([new Uint8Array(MANIFEST_CHUNK_BYTES * 2)], "large.zip", {
+      type: "application/zip",
+    });
+    const manifest = [{ id: "file-1", name: file.name, size: file.size, mimeType: file.type }];
+    const runtime = await startSenderRuntime(
+      "session-active-direct",
+      "sender-token",
+      [file],
+      manifest,
+      handlers,
+    );
+    await settle();
+    const channel = peer(0).channels[0];
+    if (!channel) throw new Error("Expected direct data channel.");
+    peer(0).iceConnectionState = "connected";
+    channel.open();
+    await settle();
+
+    socket().close();
+    await settle();
+
+    expect(channel.readyState).toBe("open");
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    runtime.stop();
+  });
+});
+
+test("signal socket close rebuilds direct transport when ICE already failed", async () => {
+  await withSenderHarness(undefined, async ({ handlers, socket, peer, settle }) => {
+    const file = new File([new Uint8Array(MANIFEST_CHUNK_BYTES * 2)], "large.zip", {
+      type: "application/zip",
+    });
+    const manifest = [{ id: "file-1", name: file.name, size: file.size, mimeType: file.type }];
+    const runtime = await startSenderRuntime(
+      "session-failed-ice",
+      "sender-token",
+      [file],
+      manifest,
+      handlers,
+    );
+    await settle();
+    const channel = peer(0).channels[0];
+    if (!channel) throw new Error("Expected direct data channel.");
+    channel.open();
+    peer(0).iceConnectionState = "failed";
+    peer(0).connectionState = "failed";
+    await settle();
+
+    socket().close();
+    await settle();
+
+    expect(channel.readyState).toBe("closed");
+    expect(FakePeerConnection.instances).toHaveLength(2);
     runtime.stop();
   });
 });

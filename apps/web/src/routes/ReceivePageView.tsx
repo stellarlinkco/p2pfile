@@ -7,6 +7,7 @@ import {
   SessionSummary,
 } from "../components/session-ui";
 import type { ReceiveFlowState } from "./receive-flow-types";
+import { shouldShowReconnectingNotice } from "./receive-flow-utils";
 
 type ReceivePageViewProps = { flow: ReceiveFlowState };
 
@@ -117,7 +118,7 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
         ) : null}
 
         {flow.stage === "occupied" ? <OccupiedNotice /> : null}
-        {flow.stage === "reconnecting" ? <ReconnectingNotice /> : null}
+        {shouldShowReconnectingNotice(flow.session, flow.stage) ? <ReconnectingNotice /> : null}
         {flow.stage === "retry-exhausted" ? <RetryExhaustedNotice /> : null}
         {flow.stage === "ended" ? <EndedNotice /> : null}
         {flow.stage === "completion-notice" ? <CompletionNotice /> : null}

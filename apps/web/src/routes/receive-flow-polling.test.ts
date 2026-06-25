@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
 import { MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
 import type { SessionPublicView } from "../lib/api";
-import { reconnectingProgressFromCurrent } from "./receive-flow-polling";
+import {
+  reconnectingProgressFromCurrent,
+  shouldEndFromSenderEndedPoll,
+  shouldPollSenderEndedForStage,
+  shouldRecoverFromReconnectingPoll,
+  shouldStopReceiverRuntimeForReconnectingPoll,
+} from "./receive-flow-polling";
+import { RECONNECTING_STATUS } from "./receive-flow-utils";
 
 function reconnectingSession(): SessionPublicView {
   return {
@@ -31,6 +38,52 @@ const reconnectingManifest = [
   { id: "file-1", name: "alpha.bin", size: MANIFEST_CHUNK_BYTES },
   { id: "file-2", name: "beta.bin", size: MANIFEST_CHUNK_BYTES * 4 },
 ];
+
+test("reconnecting poll keeps receiver runtime alive while actively receiving", () => {
+  expect(shouldStopReceiverRuntimeForReconnectingPoll("receiving")).toBe(false);
+  expect(shouldStopReceiverRuntimeForReconnectingPoll("connecting")).toBe(true);
+  expect(shouldStopReceiverRuntimeForReconnectingPoll("manifest")).toBe(true);
+});
+
+test("reconnecting receiver stage keeps polling for sender recovery", () => {
+  expect(shouldPollSenderEndedForStage("reconnecting")).toBe(true);
+});
+
+test("reconnecting poll still updates receiver status while keeping receiving stage", () => {
+  expect(RECONNECTING_STATUS).toContain("等待发送方重新连接");
+});
+
+test("reconnecting poll does not treat ended session as sender recovery", () => {
+  const endedSession = {
+    ...reconnectingSession(),
+    ended: true,
+    state: "ended",
+    status: "ended",
+  } satisfies SessionPublicView;
+
+  expect(shouldRecoverFromReconnectingPoll("reconnecting", endedSession)).toBe(false);
+});
+
+test("sender ended poll recognizes ended session before recovery handling", () => {
+  const endedSession = {
+    ...reconnectingSession(),
+    ended: true,
+    state: "ended",
+    status: "ended",
+  } satisfies SessionPublicView;
+
+  expect(shouldEndFromSenderEndedPoll(endedSession)).toBe(true);
+});
+
+test("reconnecting poll clears stale status after active receiving recovers", () => {
+  const activeSession = {
+    ...reconnectingSession(),
+    state: "transferring",
+    status: "transferring",
+  } satisfies SessionPublicView;
+
+  expect(shouldRecoverFromReconnectingPoll("receiving", activeSession)).toBe(true);
+});
 
 test("polling reconnecting session preserves current active per-file progress", () => {
   const session = reconnectingSession();

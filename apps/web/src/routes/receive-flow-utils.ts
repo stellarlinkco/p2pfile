@@ -20,6 +20,26 @@ export type ReceiverStage =
   | "retry-exhausted"
   | "failed";
 
+export function shouldShowReconnectingNotice(
+  session: SessionPublicView | null,
+  stage: ReceiverStage,
+) {
+  if (stage === "reconnecting") {
+    return true;
+  }
+  return session?.status === "reconnecting" && (stage === "receiving" || stage === "connecting");
+}
+
+export function nextReceiverStageAfterProgress(current: ReceiverStage, runtimeFinished: boolean) {
+  if (runtimeFinished || current === "completed") {
+    return current;
+  }
+  if (current === "reconnecting") {
+    return "reconnecting";
+  }
+  return "receiving";
+}
+
 function fileProgressFromSession(
   session: SessionPublicView | null,
   committedBytesByFileId: ReadonlyMap<string, number>,

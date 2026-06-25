@@ -53,7 +53,14 @@ export async function installSenderSocketControl(page: Page) {
     });
     Object.defineProperty(window, "__P2PFILE_CLOSE_SENDER_SIGNAL__", {
       configurable: true,
-      value: () => sockets.at(-1)?.close(1000, "controlled sender interruption"),
+      value: () => {
+        const target = sockets.at(-1);
+        if (!target) return;
+        const replacement = new ControlledWebSocket(target.url);
+        replacement.addEventListener("open", () => {
+          target.close(1000, "controlled sender interruption");
+        });
+      },
     });
   });
 }

@@ -16,11 +16,17 @@ import {
 import type { ServerWebSocket } from "bun";
 import { sweepExpiredSessions } from "./session-expiration";
 import { createStoredSession } from "./session-factory";
-import { isTerminallyClosed, markSessionEnded, markSessionFailed } from "./session-lifecycle";
+import {
+  isTerminallyClosed,
+  markSessionEnded,
+  markSessionFailed,
+  markSessionReconnecting,
+} from "./session-lifecycle";
 import {
   DEFAULT_COMPLETED_VIEW_TTL_MS,
   DEFAULT_HEARTBEAT_TTL_MS,
   DEFAULT_OPEN_SESSION_TTL_MS,
+  DEFAULT_SENDER_RECONNECT_GRACE_MS,
   DEFAULT_SHARE_PATH_PREFIX,
   type LiveSessionStoreOptions,
   type StoredSession,
@@ -38,6 +44,7 @@ export class LiveSessionStore {
   private readonly openSessionTtlMs: number;
   private readonly completedViewTtlMs: number;
   private readonly heartbeatTtlMs: number;
+  private readonly senderReconnectGraceMs: number;
   private readonly sharePathPrefix: string;
   private readonly now: () => number;
 
@@ -45,6 +52,8 @@ export class LiveSessionStore {
     this.openSessionTtlMs = options.openSessionTtlMs ?? DEFAULT_OPEN_SESSION_TTL_MS;
     this.completedViewTtlMs = options.completedViewTtlMs ?? DEFAULT_COMPLETED_VIEW_TTL_MS;
     this.heartbeatTtlMs = options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS;
+    this.senderReconnectGraceMs =
+      options.senderReconnectGraceMs ?? DEFAULT_SENDER_RECONNECT_GRACE_MS;
     this.sharePathPrefix = options.sharePathPrefix ?? DEFAULT_SHARE_PATH_PREFIX;
     this.now = options.now ?? Date.now;
   }
@@ -218,7 +227,13 @@ export class LiveSessionStore {
     if (role === "receiver" && session.state === "waiting") return false;
     detachSocket(session, role);
     session.sockets[role] = socket;
-    if (role === "sender") session.senderLastSeenAt = this.now();
+    if (role === "sender") {
+      session.senderLastSeenAt = this.now();
+      if (session.state === "reconnecting") {
+        session.state = session.receiverToken ? "transferring" : "connecting";
+        session.openExpiresAt = null;
+      }
+    }
     markConnecting(session);
     return true;
   }
@@ -234,6 +249,10 @@ export class LiveSessionStore {
     if (socket && session.sockets[role] !== socket) return;
     detachSocket(session, role);
     if (role === "sender" && session.state !== "completed-view") {
+      if (session.state === "connecting" || session.state === "transferring") {
+        markSessionReconnecting(session, this.now(), this.senderReconnectGraceMs);
+        return;
+      }
       markSessionEnded(session, this.now(), "sender-disconnected");
     }
   }
@@ -273,7 +292,8 @@ export class LiveSessionStore {
       }
       return true;
     }
-    if (envelope.type === "transfer-complete") return false;
+    if (envelope.type === "transfer-complete" || envelope.type === "sender-reconnecting")
+      return false;
     sendToPeer(session, role, envelope);
     return true;
   }

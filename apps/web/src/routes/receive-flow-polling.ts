@@ -21,6 +21,35 @@ type SenderEndedPollingOptions = {
   setStatus: (status: string) => void;
 };
 
+export function shouldStopReceiverRuntimeForReconnectingPoll(stage: ReceiverStage) {
+  return stage !== "receiving";
+}
+
+export function shouldPollSenderEndedForStage(stage: ReceiverStage) {
+  return (
+    stage === "manifest" ||
+    stage === "connecting" ||
+    stage === "receiving" ||
+    stage === "reconnecting"
+  );
+}
+
+export function shouldRecoverFromReconnectingPoll(
+  stage: ReceiverStage,
+  session: SessionPublicView,
+) {
+  return (
+    (stage === "reconnecting" || stage === "receiving") &&
+    session.status !== "reconnecting" &&
+    session.status !== "ended" &&
+    !session.ended
+  );
+}
+
+export function shouldEndFromSenderEndedPoll(session: SessionPublicView) {
+  return session.status === "ended" || session.ended;
+}
+
 export function reconnectingProgressFromCurrent(
   session: SessionPublicView,
   current: TransferProgress,
@@ -45,7 +74,7 @@ export function useSenderEndedPolling({
   setStatus,
 }: SenderEndedPollingOptions) {
   useEffect(() => {
-    if (!session || (stage !== "manifest" && stage !== "connecting" && stage !== "receiving")) {
+    if (!session || !shouldPollSenderEndedForStage(stage)) {
       return;
     }
 
@@ -57,22 +86,39 @@ export function useSenderEndedPolling({
           setSession(latest);
           setProgress((current) => reconnectingProgressFromCurrent(latest, current));
           setMode(latest.transferMode);
-          stopReceiverRuntime(runtimeRef);
-          setStage("reconnecting");
           setStatus(RECONNECTING_STATUS);
+          if (shouldStopReceiverRuntimeForReconnectingPoll(stage)) {
+            stopReceiverRuntime(runtimeRef);
+            setStage("reconnecting");
+          }
+          return;
+        }
+
+        if (shouldEndFromSenderEndedPoll(latest)) {
+          setSession(latest);
+          setProgress(initialProgress(latest));
+          setMode(latest.transferMode);
+          stopReceiverRuntime(runtimeRef);
+          setStage("ended");
+          setStatus("Sender-Ended Session：发送方已离开，请请求重新创建会话。");
+          return;
+        }
+
+        if (shouldRecoverFromReconnectingPoll(stage, latest)) {
+          setSession(latest);
+          setMode(latest.transferMode);
+          if (stage === "reconnecting") {
+            setStage("manifest");
+            setStatus("发送方已重新连接：请继续接收。");
+          } else {
+            setStatus("发送方已重新连接，继续接收中。");
+          }
           return;
         }
 
         if (latest.status !== "ended") {
           return;
         }
-
-        setSession(latest);
-        setProgress(initialProgress(latest));
-        setMode(latest.transferMode);
-        stopReceiverRuntime(runtimeRef);
-        setStage("ended");
-        setStatus("Sender-Ended Session：发送方已离开，请请求重新创建会话。");
       } catch {
         // Ignore transient polling failures.
       }

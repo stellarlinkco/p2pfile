@@ -6,6 +6,7 @@ export type RedisLike = {
   set(key: string, value: string): Promise<unknown>;
   del(key: string): Promise<unknown>;
   expire?(key: string, seconds: number): Promise<unknown>;
+  persist?(key: string): Promise<unknown>;
 };
 
 type RedisClientConstructor = new (url: string) => RedisLike;
@@ -13,7 +14,8 @@ type RedisClientConstructor = new (url: string) => RedisLike;
 const SESSION_KEY_PREFIX = "p2pfile:session:";
 const ACCESS_CODE_KEY_PREFIX = "p2pfile:access-code:";
 
-const sessionKey = (sessionId: string) => `${SESSION_KEY_PREFIX}${sessionId}`;
+export const redisSessionKey = (sessionId: string) => `${SESSION_KEY_PREFIX}${sessionId}`;
+const sessionKey = redisSessionKey;
 const accessCodeKey = (accessCode: string) => `${ACCESS_CODE_KEY_PREFIX}${accessCode}`;
 
 export function createRedisClient(redisUrl: string): RedisLike {
@@ -53,7 +55,12 @@ export async function saveRedisSession(client: RedisLike, session: StoredSession
   await client.set(accessCodeKey(session.accessCode), session.id);
   const expiresAt =
     session.state === "completed-view" ? session.completedViewExpiresAt : session.openExpiresAt;
-  if (!client.expire || expiresAt === null) return;
+  if (expiresAt === null) {
+    await client.persist?.(sessionKey(session.id));
+    await client.persist?.(accessCodeKey(session.accessCode));
+    return;
+  }
+  if (!client.expire) return;
   const ttlSeconds = Math.max(1, Math.ceil((expiresAt - now) / 1000));
   await client.expire(sessionKey(session.id), ttlSeconds);
   await client.expire(accessCodeKey(session.accessCode), ttlSeconds);

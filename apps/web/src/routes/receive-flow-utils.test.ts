@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
 import type { SessionPublicView } from "../lib/api";
 import {
+  nextReceiverStageAfterProgress,
   progressFromCommitted,
   receiverStageFromClaim,
   receiverStageFromSession,
   sessionIdFromEntry,
+  shouldShowReconnectingNotice,
 } from "./receive-flow-utils";
 
 const failedSession: SessionPublicView = {
@@ -62,6 +64,24 @@ test("recoverable sender reconnecting session routes to reconnecting guidance", 
       status: "reconnecting",
     }),
   ).toBe("reconnecting");
+});
+
+test("reconnecting notice stays visible during active receiving when session status is reconnecting", () => {
+  const session: SessionPublicView = {
+    ...failedSession,
+    claimed: true,
+    state: "reconnecting",
+    status: "reconnecting",
+  };
+  expect(shouldShowReconnectingNotice(session, "receiving")).toBe(true);
+  expect(shouldShowReconnectingNotice(session, "connecting")).toBe(true);
+  expect(shouldShowReconnectingNotice(session, "manifest")).toBe(false);
+});
+
+test("progress updates do not downgrade reconnecting stage back to receiving", () => {
+  expect(nextReceiverStageAfterProgress("reconnecting", false)).toBe("reconnecting");
+  expect(nextReceiverStageAfterProgress("receiving", false)).toBe("receiving");
+  expect(nextReceiverStageAfterProgress("completed", false)).toBe("completed");
 });
 
 test("completed claim without local files routes to completion notice", () => {

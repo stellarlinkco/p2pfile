@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resumeProgressFromManifest } from "@p2pfile/shared";
-import type { RedisLike } from "./redis-session-storage";
+import { type RedisLike, redisSessionKey } from "./redis-session-storage";
 import { RedisSessionStore } from "./redis-store";
 
 class MemoryRedis implements RedisLike {
@@ -23,6 +23,10 @@ class MemoryRedis implements RedisLike {
   async expire(key: string, seconds: number) {
     this.expirations.set(key, seconds);
   }
+
+  async persist(key: string) {
+    this.expirations.delete(key);
+  }
 }
 
 class FakeSocket {
@@ -31,11 +35,23 @@ class FakeSocket {
   send(payload: string) {
     this.sent.push(JSON.parse(payload));
   }
+
+  closeCode: number | null = null;
+
+  close(code?: number) {
+    this.closeCode = code ?? null;
+  }
 }
 
 const redisUrl = process.env.REDIS_URL;
 
-function createMemoryStore(options: { now?: () => number; completedViewTtlMs?: number } = {}) {
+function createMemoryStore(
+  options: {
+    now?: () => number;
+    completedViewTtlMs?: number;
+    senderReconnectGraceMs?: number;
+  } = {},
+) {
   return new RedisSessionStore("redis://memory", options, new MemoryRedis());
 }
 
@@ -157,6 +173,208 @@ test("RedisSessionStore forwards websocket signals between same-process peers", 
   ).toBe(false);
 });
 
+test("RedisSessionStore enters reconnecting when transferring sender disconnects", async () => {
+  const store = createMemoryStore();
+  const { claimed, created } = await createClaimedSession(store);
+  const sender = new FakeSocket();
+  const receiver = new FakeSocket();
+  await store.connectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    receiver as never,
+  );
+  await store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 0,
+        progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+      },
+    }),
+  );
+
+  await store.disconnectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+
+  const session = await store.getPublicSession(created.sessionId);
+  expect(session?.state).toBe("reconnecting");
+  expect(receiver.sent).toContainEqual({
+    type: "sender-reconnecting",
+    payload: { reason: "sender-disconnected" },
+  });
+});
+
+test("RedisSessionStore restores transferring and clears reconnect TTL when sender reconnects", async () => {
+  const client = new MemoryRedis();
+  const store = new RedisSessionStore("redis://memory", {}, client);
+  const { claimed, created } = await createClaimedSession(store);
+  const sender = new FakeSocket();
+  const receiver = new FakeSocket();
+  await store.connectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    receiver as never,
+  );
+  await store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 0,
+        progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+      },
+    }),
+  );
+  await store.disconnectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+
+  const replacementSender = new FakeSocket();
+  await store.connectSocket(
+    created.sessionId,
+    "sender",
+    created.senderToken,
+    replacementSender as never,
+  );
+
+  const session = await store.getPublicSession(created.sessionId);
+  expect(session?.state).toBe("transferring");
+  expect(client.expirations.has(redisSessionKey(created.sessionId))).toBe(false);
+});
+
+test("RedisSessionStore sender end notifies and closes connected receiver socket", async () => {
+  const store = createMemoryStore();
+  const { claimed, created } = await createClaimedSession(store);
+  const sender = new FakeSocket();
+  const receiver = new FakeSocket();
+  await store.connectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    receiver as never,
+  );
+
+  await store.endSession(created.sessionId, { senderToken: created.senderToken });
+
+  expect(receiver.sent).toContainEqual({
+    type: "sender-left",
+    payload: { reason: "sender-ended" },
+  });
+  expect(receiver.closeCode).toBe(1000);
+});
+
+test("RedisSessionStore sender-left signal keeps ended session on short TTL", async () => {
+  let now = 1_000;
+  const client = new MemoryRedis();
+  const store = new RedisSessionStore(
+    "redis://memory",
+    { completedViewTtlMs: 2_000, now: () => now },
+    client,
+  );
+  const { claimed, created } = await createClaimedSession(store);
+  const sender = new FakeSocket();
+  const receiver = new FakeSocket();
+  await store.connectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    receiver as never,
+  );
+
+  expect(
+    await store.handleSignal(
+      created.sessionId,
+      "sender",
+      created.senderToken,
+      JSON.stringify({ type: "sender-left", payload: { reason: "sender-left" } }),
+    ),
+  ).toBe(true);
+  now += 1;
+
+  expect((await store.getPublicSession(created.sessionId))?.state).toBe("ended");
+  expect(client.expirations.get(redisSessionKey(created.sessionId))).toBe(2);
+});
+
+test("RedisSessionStore rejects sender reattach after reconnect grace expires", async () => {
+  let now = 1_000;
+  const store = createMemoryStore({ senderReconnectGraceMs: 100, now: () => now });
+  const { claimed, created } = await createClaimedSession(store);
+  const sender = new FakeSocket();
+  const receiver = new FakeSocket();
+  await store.connectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    receiver as never,
+  );
+  await store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 0,
+        progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+      },
+    }),
+  );
+  await store.disconnectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+
+  now += 101;
+  const replacementSender = new FakeSocket();
+
+  expect(
+    await store.connectSocket(
+      created.sessionId,
+      "sender",
+      created.senderToken,
+      replacementSender as never,
+    ),
+  ).toBe(false);
+  expect((await store.getPublicSession(created.sessionId))?.state).toBe("ended");
+  expect(receiver.sent).toContainEqual({
+    type: "sender-left",
+    payload: { reason: "sender-timeout" },
+  });
+  expect(receiver.closeCode).toBe(1000);
+});
+
+test("RedisSessionStore rejects client-originated sender-reconnecting signals", async () => {
+  const store = createMemoryStore();
+  const { claimed, created } = await createClaimedSession(store);
+  const sender = new FakeSocket();
+  const receiver = new FakeSocket();
+  await store.connectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    receiver as never,
+  );
+
+  expect(
+    await store.handleSignal(
+      created.sessionId,
+      "sender",
+      created.senderToken,
+      JSON.stringify({ type: "sender-reconnecting", payload: { reason: "spoofed" } }),
+    ),
+  ).toBe(false);
+  expect(receiver.sent).not.toContainEqual({
+    type: "sender-reconnecting",
+    payload: { reason: "spoofed" },
+  });
+});
 test.skipIf(!redisUrl)(
   "RedisSessionStore persists session state and access-code index",
   async () => {

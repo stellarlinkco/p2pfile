@@ -56,6 +56,10 @@ _Avoid_: permanent link lifetime, post-claim timeout
 A temporary session window that was explicitly closed by the sender before or during transfer.
 _Avoid_: browser accident only, implicit disappearance
 
+**Reconnecting Session**:
+A temporary recovery state after an accidental sender signaling disconnect where the original sender may reconnect before a short grace window expires.
+_Avoid_: completed session, sender-ended session, durable pause
+
 **Frozen Manifest**:
 A file manifest that cannot change after the temporary session window is created.
 _Avoid_: mutable share list, append-only live batch

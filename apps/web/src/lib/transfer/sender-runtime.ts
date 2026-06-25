@@ -298,17 +298,45 @@ export async function startSenderRuntime(
     createDirectAttempt();
   };
 
-  const reattachSignalSocket = () => {
-    if (stopped || completed) return;
+  const canPreserveDirectTransport = () => {
+    const iceState = pc?.iceConnectionState;
+    const peerState = pc?.connectionState;
+    const transportFailed =
+      iceState === "closed" ||
+      peerState === "failed" ||
+      peerState === "closed" ||
+      (iceState === "failed" && !peerState);
+    return (
+      transferring &&
+      fallback.mode !== "ws-relay" &&
+      channel?.readyState === "open" &&
+      pc?.signalingState !== "closed" &&
+      !transportFailed
+    );
+  };
+
+  const resetDirectTransportIfNeeded = () => {
+    if (canPreserveDirectTransport()) return true;
     transferring = false;
     queue.reset();
     closeDirectTransport();
+    return false;
+  };
+
+  const reattachSignalSocket = () => {
+    if (stopped || completed) return;
+    resetDirectTransportIfNeeded();
     handlers.onStatus("Waiting for peer reconnect");
     ws = openSenderSignalSocket(sessionId, senderToken);
     attachSignalSocket(ws);
     void awaitSocketOpen(ws)
       .then(() => {
         if (stopped || completed) return;
+        if (resetDirectTransportIfNeeded()) return;
+        if (fallback.mode === "ws-relay") {
+          void beginRelayTransfer();
+          return;
+        }
         if (relayOnly) {
           fallback.startRelayMode(() =>
             sendSignal(ws, { type: "mode", payload: { mode: "relay" } }),

@@ -325,6 +325,12 @@ export const SignalEnvelopeSchema = z.discriminatedUnion("type", [
     }),
   }),
   z.object({
+    type: z.literal("sender-reconnecting"),
+    payload: z.object({
+      reason: z.string().min(1).optional(),
+    }),
+  }),
+  z.object({
     type: z.literal("relay-ready"),
     payload: z.object({}),
   }),
