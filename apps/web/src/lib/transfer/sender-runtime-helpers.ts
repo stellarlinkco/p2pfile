@@ -167,6 +167,7 @@ function awaitCommit(
   fileId: string,
   chunkIndex: number,
   expectedCommittedBytes: number,
+  shouldContinue: () => boolean,
 ) {
   if (typeof channel.addEventListener !== "function") {
     return Promise.resolve(expectedCommittedBytes);
@@ -174,7 +175,10 @@ function awaitCommit(
   const key = `${fileId}:${chunkIndex}`;
   const deferred = Promise.withResolvers<number>();
   pendingCommits.set(key, deferred);
-  const onClose = () => deferred.reject(new Error("Data channel is not open."));
+  const onClose = () =>
+    deferred.reject(
+      new Error(shouldContinue() ? "Data channel is not open." : "Transfer restarted."),
+    );
   channel.addEventListener("close", onClose, { once: true });
   return deferred.promise.finally(() => {
     channel.removeEventListener("close", onClose);
@@ -237,7 +241,10 @@ export async function sendFiles(
             chunk.file.id,
             chunk.chunkIndex,
             chunk.offset + chunk.bytes.byteLength,
+            shouldContinue,
           );
+          // Sync send keeps channel-close failures immediate; pipeline + beforeChunk
+          // provides FastSend-style multi-chunk flow under bufferedAmount backpressure.
           sendProtocolMessage(channel, {
             type: "chunk",
             fileId: chunk.file.id,

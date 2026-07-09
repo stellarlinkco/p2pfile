@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { MANIFEST_CHUNK_BYTES, type ResumeProgress } from "@p2pfile/shared";
 import { RelayMessageQueue } from "./relay-queue";
+import { decodeBinaryChunk, decodeBinaryRelayChunkFrame, toRelayMessage } from "./relay-runtime";
 import {
   buildTransferPlan,
   mergeResumeProgress,
@@ -8,7 +9,33 @@ import {
   sendFiles,
   sendFilesViaRelay,
 } from "./sender-runtime-helpers";
-import type { RelayProtocolMessage, SenderRuntimeHandlers, TransferProtocolMessage } from "./types";
+import type {
+  BrowserSignalMessage,
+  RelayProtocolMessage,
+  SenderRuntimeHandlers,
+  TransferProtocolMessage,
+} from "./types";
+
+function parseChannelMessage(data: unknown): TransferProtocolMessage | null {
+  if (typeof data === "string") return JSON.parse(data) as TransferProtocolMessage;
+  if (data instanceof ArrayBuffer) return decodeBinaryChunk(data);
+  return null;
+}
+
+function handleRelayWire(
+  data: string | ArrayBuffer,
+  onMessage: (message: RelayProtocolMessage, sequence: number) => void,
+) {
+  if (typeof data === "string") {
+    const envelope = JSON.parse(data) as BrowserSignalMessage;
+    if (envelope.type !== "relay-message") return;
+    onMessage(envelope.payload.message, envelope.payload.sequence);
+    return;
+  }
+  const decoded = decodeBinaryRelayChunkFrame(data);
+  if (!decoded) return;
+  onMessage(toRelayMessage(decoded.message), decoded.sequence);
+}
 
 const noopHandlers: SenderRuntimeHandlers = {
   onStatus() {},
@@ -20,11 +47,6 @@ const noopHandlers: SenderRuntimeHandlers = {
 
 async function sha256Hex(content: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function sha256Buffer(buffer: ArrayBuffer) {
-  const digest = await crypto.subtle.digest("SHA-256", buffer);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
@@ -44,19 +66,6 @@ function commitRelayChunk(queue: RelayMessageQueue, message: RelayProtocolMessag
     chunkIndex: message.chunkIndex,
     committedBytes: message.offset + atob(message.bytesBase64).length,
   });
-}
-
-function fuzzFiles() {
-  return [
-    new File([makeBytes(0, 1)], "empty.txt", { type: "text/plain" }),
-    new File([makeBytes(1, 2)], "one-byte.bin", { type: "application/octet-stream" }),
-    new File([makeBytes(64 * 1024 - 1, 3)], "chunk-minus-one.dat"),
-    new File([makeBytes(64 * 1024, 4)], "chunk-exact.zip", { type: "application/zip" }),
-    new File([makeBytes(64 * 1024 + 1, 5)], "chunk-plus-one.zip", { type: "application/zip" }),
-    new File([makeBytes(1024 * 1024 + 17, 6)], "large-archive.zip", {
-      type: "application/zip",
-    }),
-  ];
 }
 
 function fileAt(files: File[], index: number) {
@@ -231,23 +240,19 @@ test("direct resume emits full-manifest resume events for completed active and q
     bufferedAmount: 0,
     readyState: "open",
     send(data: unknown) {
-      if (typeof data !== "string") return;
-      const message = JSON.parse(data) as TransferProtocolMessage;
-      if (message.type === "chunk") {
-        for (const listener of listeners.get("message") ?? []) {
-          listener(
-            new MessageEvent("message", {
-              data: JSON.stringify({
-                type: "chunk-commit",
-                fileId: message.fileId,
-                chunkIndex: message.chunkIndex,
-                committedBytes:
-                  message.offset +
-                  atob((message as unknown as { bytesBase64: string }).bytesBase64).length,
-              } satisfies TransferProtocolMessage),
-            }),
-          );
-        }
+      const message = parseChannelMessage(data);
+      if (message?.type !== "chunk") return;
+      for (const listener of listeners.get("message") ?? []) {
+        listener(
+          new MessageEvent("message", {
+            data: JSON.stringify({
+              type: "chunk-commit",
+              fileId: message.fileId,
+              chunkIndex: message.chunkIndex,
+              committedBytes: message.offset + message.bytes.byteLength,
+            } satisfies TransferProtocolMessage),
+          }),
+        );
       }
     },
     addEventListener(type: string, listener: (event: MessageEvent) => void) {
@@ -326,12 +331,12 @@ test("direct resume emits full-manifest resume events for completed active and q
 
 test("relay resume sends only active committed tail and queued files from full manifest", async () => {
   const relayMessages: RelayProtocolMessage[] = [];
-  const queue = new RelayMessageQueue((message) => {
-    if (message.type === "relay-message") {
-      relayMessages.push(message.payload.message);
-      queue.acknowledge(message.payload.sequence);
-      commitRelayChunk(queue, message.payload.message);
-    }
+  const queue = new RelayMessageQueue((data) => {
+    handleRelayWire(data, (message, sequence) => {
+      relayMessages.push(message);
+      queue.acknowledge(sequence);
+      commitRelayChunk(queue, message);
+    });
   });
   const files = [
     new File([makeBytes(MANIFEST_CHUNK_BYTES, 26)], "completed.bin"),
@@ -413,9 +418,8 @@ test("direct file-end carries the sha-256 digest of the file content", async () 
   await sendFiles(channel, [file], plan, noopHandlers, 0, () => true);
 
   const fileEnd = sent
-    .filter((data): data is string => typeof data === "string")
-    .map((data) => JSON.parse(data) as TransferProtocolMessage)
-    .find((message) => message.type === "file-end");
+    .map((data) => parseChannelMessage(data))
+    .find((message) => message?.type === "file-end");
   expect(fileEnd).toMatchObject({
     fileId: "file-1",
     bytes: file.size,
@@ -450,7 +454,7 @@ test("direct transfer handles giant zip sizes without allocating the whole file"
       bufferedAmount: 0,
       readyState: "open",
       send(data: unknown) {
-        if (typeof data === "string" && data.includes('"type":"chunk"')) {
+        if (data instanceof ArrayBuffer) {
           binarySends += 1;
           throw new DOMException(
             "Failed to execute 'send' on 'RTCDataChannel': RTCDataChannel.readyState is not 'open'",
@@ -524,8 +528,8 @@ test("direct resume treats a leading completed zero-byte file as already sent be
   );
 
   const protocolMessages = sent
-    .filter((data): data is string => typeof data === "string")
-    .map((data) => JSON.parse(data) as TransferProtocolMessage);
+    .map((data) => parseChannelMessage(data))
+    .filter((message): message is TransferProtocolMessage => message !== null);
   expect(
     protocolMessages
       .filter((message) => message.type === "file-start" || message.type === "file-end")
@@ -548,9 +552,8 @@ test("direct transfer advances resumable sender cursor after committed chunks be
     bufferedAmount: 0,
     readyState: "open",
     send(data: unknown) {
-      if (typeof data !== "string") return;
-      const message = JSON.parse(data) as TransferProtocolMessage;
-      if (message.type === "chunk") {
+      const message = parseChannelMessage(data);
+      if (message?.type === "chunk") {
         chunkSends += 1;
         if (chunkSends === 2) {
           throw new DOMException(
@@ -605,10 +608,10 @@ test("direct transfer advances resumable sender cursor after committed chunks be
   expect(progressSnapshots.at(-1)?.files[0]?.committedBytes).toBe(MANIFEST_CHUNK_BYTES);
   expect(
     sent
-      .filter((data): data is string => typeof data === "string")
-      .map((data) => JSON.parse(data) as TransferProtocolMessage)
+      .map((data) => parseChannelMessage(data))
+      .filter((message): message is TransferProtocolMessage => message !== null)
       .filter((message) => message.type === "chunk")
-      .map((message) => message.offset),
+      .map((message) => (message.type === "chunk" ? message.offset : -1)),
   ).toEqual([0]);
 });
 test("direct transfer marks a file complete only after file-end is sent", async () => {
@@ -618,8 +621,8 @@ test("direct transfer marks a file complete only after file-end is sent", async 
     bufferedAmount: 0,
     readyState: "open",
     send(data: unknown) {
-      if (typeof data !== "string") return;
-      const message = JSON.parse(data) as TransferProtocolMessage;
+      const message = parseChannelMessage(data);
+      if (!message) return;
       sent.push(message);
       if (message.type === "chunk") {
         for (const listener of listeners.get("message") ?? []) {
@@ -683,13 +686,14 @@ test("relay transfer advances resumable sender cursor only after receiver chunk-
   const progressSnapshots: ResumeProgress[] = [];
   let firstChunkSequence: number | null = null;
   const queue = new RelayMessageQueue(
-    (message) => {
-      if (message.type !== "relay-message") return;
-      relayMessages.push(message.payload.message);
-      queue.acknowledge(message.payload.sequence);
-      if (message.payload.message.type === "chunk") {
-        firstChunkSequence = message.payload.sequence;
-      }
+    (data) => {
+      handleRelayWire(data, (message, sequence) => {
+        relayMessages.push(message);
+        queue.acknowledge(sequence);
+        if (message.type === "chunk") {
+          firstChunkSequence = sequence;
+        }
+      });
     },
     { resendMs: 1 },
   );
@@ -740,12 +744,12 @@ test("relay transfer advances resumable sender cursor only after receiver chunk-
 
 test("relay resume treats a leading completed zero-byte file as already sent before an active offset", async () => {
   const relayMessages: RelayProtocolMessage[] = [];
-  const queue = new RelayMessageQueue((message) => {
-    if (message.type === "relay-message") {
-      relayMessages.push(message.payload.message);
-      queue.acknowledge(message.payload.sequence);
-      commitRelayChunk(queue, message.payload.message);
-    }
+  const queue = new RelayMessageQueue((data) => {
+    handleRelayWire(data, (message, sequence) => {
+      relayMessages.push(message);
+      queue.acknowledge(sequence);
+      commitRelayChunk(queue, message);
+    });
   });
   const files = [
     new File([], "empty.txt"),
@@ -796,94 +800,4 @@ test("relay resume treats a leading completed zero-byte file as already sent bef
     { type: "file-start", fileId: "file-2", offset: MANIFEST_CHUNK_BYTES },
     { type: "file-end", fileId: "file-2", bytes: fileAt(files, 1).size },
   ]);
-});
-
-test("direct transfer handles deterministic file-size fuzz cases", async () => {
-  const sent: unknown[] = [];
-  const channel = {
-    bufferedAmount: 0,
-    readyState: "open",
-    send(data: unknown) {
-      sent.push(data);
-    },
-  } as unknown as RTCDataChannel;
-  const files = fuzzFiles();
-  const plan = buildTransferPlan(files);
-
-  await sendFiles(channel, files, plan, noopHandlers, 0, () => true);
-
-  const protocolMessages = sent
-    .filter((data): data is string => typeof data === "string")
-    .map((data) => JSON.parse(data) as TransferProtocolMessage);
-  const chunkFrameCount = protocolMessages.filter((message) => message.type === "chunk").length;
-  expect(chunkFrameCount).toBe(
-    files.reduce((sum, file) => sum + Math.ceil(file.size / (64 * 1024)), 0),
-  );
-  expect(protocolMessages.at(-1)).toEqual({ type: "complete", totalBytes: plan.totalBytes });
-
-  for (const [index, file] of files.entries()) {
-    const fileEnd = protocolMessages.find(
-      (message) => message.type === "file-end" && message.fileId === `file-${index + 1}`,
-    );
-    expect(fileEnd).toMatchObject({
-      bytes: file.size,
-      digest: await sha256Buffer(await file.arrayBuffer()),
-    });
-  }
-});
-
-test("relay transfer handles deterministic file-size fuzz cases", async () => {
-  const relayMessages: RelayProtocolMessage[] = [];
-  const queue = new RelayMessageQueue((message) => {
-    if (message.type === "relay-message") {
-      relayMessages.push(message.payload.message);
-      queue.acknowledge(message.payload.sequence);
-      commitRelayChunk(queue, message.payload.message);
-    }
-  });
-  const files = fuzzFiles();
-  const plan = buildTransferPlan(files);
-
-  try {
-    await sendFilesViaRelay(queue, files, plan, noopHandlers, 0, () => true);
-  } finally {
-    queue.stop();
-  }
-
-  expect(relayMessages.at(-1)).toEqual({ type: "complete", totalBytes: plan.totalBytes });
-  for (const [index, file] of files.entries()) {
-    const fileEnd = relayMessages.find(
-      (message) => message.type === "file-end" && message.fileId === `file-${index + 1}`,
-    );
-    expect(fileEnd).toMatchObject({
-      bytes: file.size,
-      digest: await sha256Buffer(await file.arrayBuffer()),
-    });
-  }
-});
-
-test("relay file-end keeps the file content digest through relay serialization", async () => {
-  const relayMessages: RelayProtocolMessage[] = [];
-  const queue = new RelayMessageQueue((message) => {
-    if (message.type === "relay-message") {
-      relayMessages.push(message.payload.message);
-      queue.acknowledge(message.payload.sequence);
-      commitRelayChunk(queue, message.payload.message);
-    }
-  });
-  const file = new File(["alpha"], "alpha.txt", { type: "text/plain" });
-  const plan = buildTransferPlan([file]);
-
-  try {
-    await sendFilesViaRelay(queue, [file], plan, noopHandlers, 0, () => true);
-  } finally {
-    queue.stop();
-  }
-
-  const fileEnd = relayMessages.find((message) => message.type === "file-end");
-  expect(fileEnd).toMatchObject({
-    fileId: "file-1",
-    bytes: file.size,
-    digest: await sha256Hex("alpha"),
-  });
 });

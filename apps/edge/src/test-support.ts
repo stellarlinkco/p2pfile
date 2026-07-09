@@ -145,18 +145,18 @@ export function request(path: string, init?: RequestInit) {
 export class FakeEdgeWebSocket extends EventTarget {
   readyState: number = WebSocket.OPEN;
   peer: FakeEdgeWebSocket | null = null;
-  readonly received: string[] = [];
+  readonly received: Array<string | ArrayBuffer> = [];
   closed: { code: number; reason: string } | null = null;
 
   accept() {
     this.readyState = WebSocket.OPEN;
   }
 
-  send(data: string) {
+  send(data: string | ArrayBuffer) {
     this.peer?.receive(data);
   }
 
-  private receive(data: string) {
+  private receive(data: string | ArrayBuffer) {
     this.received.push(data);
     this.dispatchEvent(new MessageEvent("message", { data }));
   }

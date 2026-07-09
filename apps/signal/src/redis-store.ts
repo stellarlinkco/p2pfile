@@ -256,14 +256,27 @@ export class RedisSessionStore {
     this.sockets.detach(sessionId, role as SessionRole, socket);
   }
 
-  async handleSignal(sessionId: string, role: string, token: string, rawMessage: string) {
+  async handleSignal(
+    sessionId: string,
+    role: string,
+    token: string,
+    rawMessage: string | ArrayBuffer | ArrayBufferView,
+  ) {
     const session = await this.load(sessionId);
     if (!session || session.state === "failed" || session.state === "ended") return false;
     if (role === "sender" && session.senderToken !== token) return false;
     if (role === "receiver" && session.receiverToken !== token) return false;
+    const signalRole = role as SessionRole;
+
+    if (typeof rawMessage !== "string") {
+      markTransferring(session);
+      await this.save(session);
+      this.sockets.sendBinaryToPeer(sessionId, signalRole, rawMessage);
+      return true;
+    }
+
     const parsed = parseSignalEnvelope(rawMessage);
     if (!parsed) return false;
-    const signalRole = role as SessionRole;
     const envelope = parsed as SignalEnvelope;
     if (role === "sender") session.senderLastSeenAt = this.now();
     if (envelope.type === "offer" && role === "sender") markConnecting(session);

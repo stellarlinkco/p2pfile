@@ -257,10 +257,34 @@ export class LiveSessionStore {
     }
   }
 
-  handleSignal(sessionId: string, role: SessionRole, token: string, rawMessage: string) {
+  handleSignal(
+    sessionId: string,
+    role: SessionRole,
+    token: string,
+    rawMessage: string | ArrayBuffer | ArrayBufferView,
+  ) {
     const session = this.sessions.get(sessionId);
     if (!session || !isValidRoleToken(session, role, token) || isTerminallyClosed(session))
       return false;
+
+    // Opaque binary relay frames (chunk payloads) are forwarded without JSON parsing.
+    if (typeof rawMessage !== "string") {
+      markTransferring(session);
+      const peerRole: SessionRole = role === "sender" ? "receiver" : "sender";
+      const peerSocket = session.sockets[peerRole];
+      if (!peerSocket) return true;
+      if (rawMessage instanceof ArrayBuffer) {
+        peerSocket.send(rawMessage);
+        return true;
+      }
+      if (ArrayBuffer.isView(rawMessage)) {
+        const view = rawMessage as ArrayBufferView;
+        peerSocket.send(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+        return true;
+      }
+      return false;
+    }
+
     const envelope = this.parseSignal(rawMessage);
     if (!envelope) return false;
     if (role === "sender") session.senderLastSeenAt = this.now();
@@ -297,7 +321,6 @@ export class LiveSessionStore {
     sendToPeer(session, role, envelope);
     return true;
   }
-
   private parseSignal(rawMessage: string) {
     try {
       const envelope = SignalEnvelopeSchema.safeParse(JSON.parse(rawMessage));

@@ -14,7 +14,9 @@ export type TransferSchedulerOptions = {
 
 export const DEFAULT_TRANSFER_SCHEDULER: TransferSchedulerOptions = {
   maxActiveFiles: 2,
-  maxInFlightBytes: MANIFEST_CHUNK_BYTES * 2,
+  // 16 chunks × 64 KiB = 1 MiB pipeline window. Keeps resume semantics while
+  // removing the single-chunk RTT ceiling for large files.
+  maxInFlightBytes: MANIFEST_CHUNK_BYTES * 16,
 };
 
 type TransferPlan = {
@@ -46,8 +48,11 @@ type ScheduledFile = {
   index: number;
   inFlightBytes: number;
   manifestItem: FileManifestItem;
+  /** Durable cursor advanced only by ordered receiver commits. */
   offset: number;
   resumeFile: ResumeProgress["files"][number];
+  /** Send cursor; may lead offset while chunks are in flight. */
+  sentOffset: number;
   started: boolean;
 };
 
@@ -138,9 +143,10 @@ export function buildTransferProgress(
   } satisfies TransferProgress;
 }
 
-async function sha256Hex(bytes: ArrayBuffer) {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+function sha256Hex(bytes: ArrayBuffer) {
+  const digest = createSha256Digest();
+  digest.update(bytes);
+  return digest.digestHex();
 }
 
 function sleep(milliseconds: number) {
@@ -217,6 +223,7 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
         manifestItem,
         offset,
         resumeFile,
+        sentOffset: offset,
         started: true,
       } satisfies ScheduledFile;
       activeFiles.push(scheduled);
@@ -246,30 +253,82 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
     return options.shouldPause?.(options.progress) === true;
   };
 
-  const trackCommit = (file: ScheduledFile, chunkBytes: ArrayBuffer, commit: Promise<number>) => {
+  const pendingCommitsByFile = new Map<
+    string,
+    Map<number, { bytes: ArrayBuffer; length: number }>
+  >();
+  const applyChains = new Map<string, Promise<void>>();
+
+  const applyCommittedChunks = async (file: ScheduledFile) => {
+    const pending = pendingCommitsByFile.get(file.manifestItem.id);
+    if (!pending) return;
+
+    while (true) {
+      const next = pending.get(file.offset);
+      if (!next) return;
+      pending.delete(file.offset);
+      file.digest.update(next.bytes);
+      file.offset += next.length;
+      file.resumeFile.committedBytes = file.offset;
+      options.onResumeProgress?.(options.progress);
+      options.recordEvent?.({
+        type: `${options.mode}-chunk-commit`,
+        fileId: file.manifestItem.id,
+        chunkIndex: Math.floor((file.offset - next.length) / MANIFEST_CHUNK_BYTES),
+        committedBytes: file.offset,
+        inFlightBytes: Math.max(0, inFlightBytes - next.length),
+      });
+      reportProgress(file.manifestItem.id);
+      const delay = chunkDelayMs();
+      if (delay > 0) await sleep(delay);
+    }
+  };
+
+  const enqueueCommitApplication = (file: ScheduledFile) => {
+    const key = file.manifestItem.id;
+    const previous = applyChains.get(key) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => applyCommittedChunks(file))
+      .finally(() => {
+        if (applyChains.get(key) === next) {
+          applyChains.delete(key);
+        }
+      });
+    applyChains.set(key, next);
+    return next;
+  };
+
+  const trackCommit = (
+    file: ScheduledFile,
+    chunkBytes: ArrayBuffer,
+    chunkOffset: number,
+    commit: Promise<number>,
+  ) => {
     const chunkLength = chunkBytes.byteLength;
+    const expectedCommittedBytes = chunkOffset + chunkLength;
     inFlightBytes += chunkLength;
     file.inFlightBytes += chunkLength;
     const tracked = commit
       .then(async (committedBytes) => {
-        const expectedCommittedBytes = file.offset + chunkLength;
         if (committedBytes !== expectedCommittedBytes) {
           throw new Error("Receiver committed an unexpected chunk offset.");
         }
-        file.digest.update(chunkBytes);
-        file.offset = committedBytes;
-        file.resumeFile.committedBytes = committedBytes;
-        options.onResumeProgress?.(options.progress);
-        options.recordEvent?.({
-          type: `${options.mode}-chunk-commit`,
-          fileId: file.manifestItem.id,
-          chunkIndex: Math.floor((committedBytes - chunkLength) / MANIFEST_CHUNK_BYTES),
-          committedBytes,
-          inFlightBytes: inFlightBytes - chunkLength,
-        });
-        reportProgress(file.manifestItem.id);
-        const delay = chunkDelayMs();
-        if (delay > 0) await sleep(delay);
+        const pending =
+          pendingCommitsByFile.get(file.manifestItem.id) ??
+          new Map<number, { bytes: ArrayBuffer; length: number }>();
+        pending.set(chunkOffset, { bytes: chunkBytes, length: chunkLength });
+        pendingCommitsByFile.set(file.manifestItem.id, pending);
+        await enqueueCommitApplication(file);
+        if (pending.size === 0) {
+          pendingCommitsByFile.delete(file.manifestItem.id);
+        }
+      })
+      .catch((error) => {
+        if (error instanceof Error && error.message === "Transfer restarted.") {
+          return;
+        }
+        throw error;
       })
       .finally(() => {
         inFlightBytes -= chunkLength;
@@ -288,36 +347,55 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
     await activateNextFiles();
 
     let madeProgress = false;
-    const activeCount = activeFiles.length;
-    for (let attempt = 0; attempt < activeCount; attempt += 1) {
-      const file = activeFiles[cursor % activeFiles.length];
-      cursor = (cursor + 1) % Math.max(1, activeFiles.length);
-      if (!file || file.inFlightBytes > 0) {
-        continue;
-      }
-      if (file.offset >= file.file.size) {
-        paused = await finishFile(file);
-        if (paused) break;
-        await activateNextFiles();
-        madeProgress = true;
+
+    for (const completed of [...activeFiles].filter((file) => file.offset >= file.file.size)) {
+      if (!activeFiles.includes(completed)) continue;
+      paused = await finishFile(completed);
+      if (paused) break;
+      await activateNextFiles();
+      madeProgress = true;
+    }
+    if (paused) {
+      return;
+    }
+
+    const sendable = activeFiles.filter((file) => file.sentOffset < file.file.size);
+    const preferred = sendable.filter((file) => file.inFlightBytes === 0);
+    const candidates = preferred.length > 0 ? preferred : sendable;
+
+    // Fill the global window. Prefer files with no outstanding commits so
+    // newly activated small files are not starved by a pipelined large file.
+    let sentThisPass = 0;
+    while (candidates.length > 0) {
+      const file = candidates[cursor % candidates.length];
+      cursor = (cursor + 1) % Math.max(1, candidates.length);
+      if (!file) {
         break;
       }
-
-      const nextChunkBytes = Math.min(MANIFEST_CHUNK_BYTES, file.file.size - file.offset);
-      if (inFlightBytes + nextChunkBytes > scheduler.maxInFlightBytes) {
+      if (file.sentOffset >= file.file.size) {
+        const index = candidates.indexOf(file);
+        if (index >= 0) candidates.splice(index, 1);
+        if (candidates.length === 0) break;
         continue;
+      }
+
+      const nextChunkBytes = Math.min(MANIFEST_CHUNK_BYTES, file.file.size - file.sentOffset);
+      if (inFlightBytes + nextChunkBytes > scheduler.maxInFlightBytes) {
+        break;
       }
 
       await options.transport.beforeChunk?.();
       assertActive();
-      const offset = file.offset;
+      const offset = file.sentOffset;
       const bytes = await file.file.slice(offset, offset + MANIFEST_CHUNK_BYTES).arrayBuffer();
       assertActive();
       const chunkIndex = Math.floor(offset / MANIFEST_CHUNK_BYTES);
       const chunkDigest = await sha256Hex(bytes);
+      file.sentOffset = offset + bytes.byteLength;
       trackCommit(
         file,
         bytes,
+        offset,
         options.transport.sendChunk({
           file: file.manifestItem,
           chunkIndex,
@@ -327,11 +405,20 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
         }),
       );
       madeProgress = true;
+      sentThisPass += 1;
+
+      // After giving a zero-inflight file its first chunk, rebuild preference
+      // so other zero-inflight files still get a slot before deeper pipeline.
+      if (preferred.includes(file) && preferred.length > 1 && sentThisPass >= preferred.length) {
+        break;
+      }
+      if (file.sentOffset >= file.file.size) {
+        const index = candidates.indexOf(file);
+        if (index >= 0) candidates.splice(index, 1);
+      }
+      if (candidates.length === 0) break;
     }
 
-    if (paused) {
-      return;
-    }
     if (madeProgress) {
       continue;
     }

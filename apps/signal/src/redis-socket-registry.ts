@@ -37,4 +37,20 @@ export class RedisSocketRegistry {
     const peerRole: SessionRole = fromRole === "sender" ? "receiver" : "sender";
     this.sockets.get(sessionId)?.[peerRole]?.send(JSON.stringify(envelope));
   }
+
+  sendBinaryToPeer(
+    sessionId: string,
+    fromRole: SessionRole,
+    rawMessage: ArrayBuffer | ArrayBufferView,
+  ) {
+    const peerRole: SessionRole = fromRole === "sender" ? "receiver" : "sender";
+    const peer = this.sockets.get(sessionId)?.[peerRole];
+    if (!peer) return;
+    if (rawMessage instanceof ArrayBuffer) {
+      peer.send(rawMessage);
+      return;
+    }
+    const view = rawMessage as ArrayBufferView;
+    peer.send(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+  }
 }

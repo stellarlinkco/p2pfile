@@ -53,12 +53,21 @@ export type TransferProgress = {
   files?: TransferFileProgress[];
 };
 
+export type TransportDiagnostics = {
+  mode: "direct" | "relay";
+  localCandidateType: string | null;
+  remoteCandidateType: string | null;
+  protocol: string | null;
+  iceTransportPolicy: "all" | "relay" | null;
+};
+
 export type SenderRuntimeHandlers = {
   onStatus: (status: string) => void;
   onMode: (mode: TransferMode) => void;
   onProgress: (progress: TransferProgress) => void;
   onComplete: () => void;
   onError: (message: string) => void;
+  onTransportDiagnostics?: (diagnostics: TransportDiagnostics) => void;
 };
 
 export type ReceivedFile = {
@@ -70,7 +79,7 @@ export type ReceivedFile = {
 };
 
 export type ReceiverRuntimeHandlers = SenderRuntimeHandlers & {
-  onFileReceived: (file: ReceivedFile) => void;
+  onFileReceived: (file: ReceivedFile) => void | Promise<void>;
   onEnded: () => void;
 };
 

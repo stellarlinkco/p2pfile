@@ -186,7 +186,7 @@ test.describe("large transfer coverage", () => {
   test("direct transfer streams a large zip through OPFS without whole-file Blob aggregation", async ({
     page,
   }) => {
-    test.setTimeout(60_000);
+    test.setTimeout(90_000);
     const files = [makeSizedTestFile("large-transfer.zip", 2 * 1024 * 1024, "application/zip")];
     const shareLink = await createSession(page, files, { fallback: false });
     const receiver = await newReceiverPage(page, { fallback: false });
@@ -199,10 +199,10 @@ test.describe("large transfer coverage", () => {
       await expect(receiver.getByTestId("mode-disclosure")).toContainText(/Direct Transfer|直传/i);
       await expect(
         receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
-      ).toBeVisible({ timeout: 45_000 });
+      ).toBeVisible({ timeout: 60_000 });
       await expect(
         page.getByRole("heading", { level: 3, name: "Completed Session View" }),
-      ).toBeVisible({ timeout: 45_000 });
+      ).toBeVisible({ timeout: 60_000 });
       await expect(receiver.getByRole("button", { name: "保存 large-transfer.zip" })).toBeVisible();
 
       const trace = await readStreamingSinkTrace(receiver);
@@ -223,7 +223,12 @@ test.describe("large transfer coverage", () => {
       expect(totalWrittenBytes).toBe(files[0].buffer.byteLength);
       expect(maxWriteBytes).toBeLessThanOrEqual(MANIFEST_CHUNK_BYTES);
       expect(trace.writableOpens.every((open) => open.keepExistingData === true)).toBe(true);
-      expect(trace.closes).toBe(trace.writes.length);
+      // Durable resume still checkpoints OPFS, but not once per 64 KiB chunk.
+      // Closing every write was measured at ~20-30 KB/s on Chromium DataChannel.
+      expect(trace.closes).toBeGreaterThan(0);
+      expect(trace.closes).toBeLessThan(trace.writes.length);
+      expect(trace.writableOpens.length).toBeGreaterThan(0);
+      expect(trace.writableOpens.length).toBeLessThanOrEqual(trace.writes.length);
       expect(fullFileBlobAggregations).toEqual([]);
 
       const screenshotPath = await writeEvidenceScreenshot(

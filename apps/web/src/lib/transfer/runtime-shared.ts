@@ -1,15 +1,23 @@
 import type { TransferMode } from "@p2pfile/shared";
 import { MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
-import { decodeChunk, encodeChunk } from "./relay-runtime";
+import {
+  decodeBinaryChunk,
+  decodeBinaryRelayChunkFrame,
+  decodeChunk,
+  encodeBinaryChunk,
+} from "./relay-runtime";
 import type {
   BrowserSignalMessage,
   ForwardedSignalMessage,
   ReceiverRuntimeHandlers,
   SenderRuntimeHandlers,
   TransferProtocolMessage,
+  TransportDiagnostics,
 } from "./types";
 
-const CHUNK_BYTES = MANIFEST_CHUNK_BYTES;
+// Allow a multi-chunk pipeline before applying send-side SCTP backpressure.
+// Commit-window backpressure (maxInFlightBytes) remains the primary control.
+const DATA_CHANNEL_HIGH_WATER_BYTES = MANIFEST_CHUNK_BYTES * 16;
 
 function configuredTurnUrl() {
   const turnUrl = import.meta.env?.VITE_TURN_URL;
@@ -108,31 +116,64 @@ export function assertDataChannelOpen(channel: RTCDataChannel) {
 
 export async function awaitBufferedAmount(channel: RTCDataChannel) {
   assertDataChannelOpen(channel);
-  if (channel.bufferedAmount < CHUNK_BYTES * 2) {
+  if (channel.bufferedAmount < DATA_CHANNEL_HIGH_WATER_BYTES) {
     return;
   }
 
-  const { promise, reject, resolve } = Promise.withResolvers<void>();
-  const onBufferedAmountLow = () => {
-    channel.removeEventListener("close", onClose);
-    resolve();
-  };
-  const onClose = () => {
-    channel.removeEventListener("bufferedamountlow", onBufferedAmountLow);
-    reject(dataChannelClosedError());
-  };
+  // Adaptive threshold inspired by FastSend: keep ~16 chunks buffered when
+  // the window is still large, otherwise drain fully.
+  channel.bufferedAmountLowThreshold = Math.min(
+    Math.floor(DATA_CHANNEL_HIGH_WATER_BYTES / 2),
+    MANIFEST_CHUNK_BYTES * 16,
+  );
 
-  channel.bufferedAmountLowThreshold = CHUNK_BYTES;
-  channel.addEventListener("bufferedamountlow", onBufferedAmountLow, { once: true });
-  channel.addEventListener("close", onClose, { once: true });
-  await promise;
+  while (channel.readyState === "open" && channel.bufferedAmount >= DATA_CHANNEL_HIGH_WATER_BYTES) {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settle = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        channel.removeEventListener("bufferedamountlow", onBufferedAmountLow);
+        channel.removeEventListener("close", onClose);
+        action();
+      };
+      const onBufferedAmountLow = () => settle(() => resolve());
+      const onClose = () => settle(() => reject(dataChannelClosedError()));
+      // Polling backup: bufferedamountlow can be missed if the buffer drains
+      // between the threshold check and listener registration.
+      const timer = globalThis.setTimeout(() => settle(() => resolve()), 32);
+
+      channel.addEventListener("bufferedamountlow", onBufferedAmountLow, { once: true });
+      channel.addEventListener("close", onClose, { once: true });
+      if (channel.bufferedAmount < DATA_CHANNEL_HIGH_WATER_BYTES) {
+        settle(() => resolve());
+      }
+    });
+  }
+
   assertDataChannelOpen(channel);
 }
 
-export function sendSignal(ws: WebSocket, message: BrowserSignalMessage) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(message));
+/**
+ * FastSend-style send pump: fire the frame immediately, then wait only when
+ * SCTP send buffer is above the high-water mark.
+ */
+export async function pumpDataChannelSend(
+  channel: RTCDataChannel,
+  data: string | ArrayBuffer,
+): Promise<void> {
+  sendDataChannelPayload(channel, data);
+  await awaitBufferedAmount(channel);
+}
+
+export function sendSignal(ws: WebSocket, message: BrowserSignalMessage | ArrayBuffer | string) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (typeof message === "string" || message instanceof ArrayBuffer) {
+    ws.send(message);
+    return;
   }
+  ws.send(JSON.stringify(message));
 }
 
 export function sendDataChannelPayload(channel: RTCDataChannel, data: string | ArrayBuffer) {
@@ -153,29 +194,79 @@ export function sendDataChannelPayload(channel: RTCDataChannel, data: string | A
 
 export function sendProtocolMessage(channel: RTCDataChannel, message: TransferProtocolMessage) {
   if (message.type === "chunk") {
-    sendDataChannelPayload(
-      channel,
-      JSON.stringify({ ...message, bytesBase64: encodeChunk(message.bytes), bytes: undefined }),
-    );
+    sendDataChannelPayload(channel, encodeBinaryChunk(message));
     return;
   }
-
   sendDataChannelPayload(channel, JSON.stringify(message));
 }
 
-export function parseSignalMessage(raw: MessageEvent<string>) {
-  if (typeof raw.data !== "string") {
-    return null;
+export async function sendProtocolMessagePumped(
+  channel: RTCDataChannel,
+  message: TransferProtocolMessage,
+) {
+  if (message.type === "chunk") {
+    await pumpDataChannelSend(channel, encodeBinaryChunk(message));
+    return;
   }
-
-  try {
-    return JSON.parse(raw.data) as ForwardedSignalMessage;
-  } catch {
-    return null;
-  }
+  await pumpDataChannelSend(channel, JSON.stringify(message));
 }
 
-export function parseProtocolMessage(data: string) {
+export type ParsedSignalWire =
+  | { kind: "json"; message: ForwardedSignalMessage }
+  | {
+      kind: "binary-relay-chunk";
+      sequence: number;
+      message: Extract<TransferProtocolMessage, { type: "chunk" }>;
+    };
+
+export function parseSignalWire(raw: MessageEvent | { data: unknown }): ParsedSignalWire | null {
+  if (typeof raw.data === "string") {
+    try {
+      return { kind: "json", message: JSON.parse(raw.data) as ForwardedSignalMessage };
+    } catch {
+      return null;
+    }
+  }
+
+  if (raw.data instanceof ArrayBuffer || ArrayBuffer.isView(raw.data)) {
+    const decoded = decodeBinaryRelayChunkFrame(raw.data);
+    if (!decoded) return null;
+    return {
+      kind: "binary-relay-chunk",
+      sequence: decoded.sequence,
+      message: decoded.message,
+    };
+  }
+
+  return null;
+}
+
+export function parseSignalMessage(
+  raw: MessageEvent | { data: unknown },
+): ForwardedSignalMessage | null {
+  const parsed = parseSignalWire(raw);
+  if (!parsed) return null;
+  if (parsed.kind === "json") return parsed.message;
+  return {
+    type: "relay-message",
+    payload: {
+      sequence: parsed.sequence,
+      message: {
+        type: "chunk",
+        fileId: parsed.message.fileId,
+        chunkIndex: parsed.message.chunkIndex,
+        offset: parsed.message.offset,
+        bytesBase64: "",
+        chunkDigest: parsed.message.chunkDigest,
+      },
+    },
+  };
+}
+
+export function parseProtocolMessage(data: string | ArrayBuffer | ArrayBufferView) {
+  if (typeof data !== "string") {
+    return decodeBinaryChunk(data);
+  }
   try {
     const parsed = JSON.parse(data) as
       | TransferProtocolMessage
@@ -201,6 +292,67 @@ export type PeerConnectionOptions = {
   iceTransportPolicy?: RTCIceTransportPolicy;
   connectedMode?: TransferMode;
 };
+
+export type { TransportDiagnostics } from "./types";
+export async function collectTransportDiagnostics(
+  pc: RTCPeerConnection,
+  mode: TransferMode,
+  iceTransportPolicy?: RTCIceTransportPolicy,
+): Promise<TransportDiagnostics> {
+  let localCandidateType: string | null = null;
+  let remoteCandidateType: string | null = null;
+  let protocol: string | null = null;
+  try {
+    const stats = await pc.getStats();
+    let selectedPairId: string | null = null;
+    const reports = new Map<string, RTCStats>();
+    stats.forEach((report) => {
+      reports.set(report.id, report);
+      if (report.type === "transport") {
+        const selected = (report as RTCStats & { selectedCandidatePairId?: string })
+          .selectedCandidatePairId;
+        if (selected) selectedPairId = selected;
+      }
+      if (
+        report.type === "candidate-pair" &&
+        (report as RTCStats & { selected?: boolean; nominated?: boolean }).selected
+      ) {
+        selectedPairId = report.id;
+      }
+    });
+    const pair = selectedPairId ? reports.get(selectedPairId) : null;
+    if (pair && pair.type === "candidate-pair") {
+      const pairReport = pair as RTCStats & {
+        localCandidateId?: string;
+        remoteCandidateId?: string;
+      };
+      const local = pairReport.localCandidateId
+        ? (reports.get(pairReport.localCandidateId) as RTCStats & {
+            candidateType?: string;
+            protocol?: string;
+          })
+        : null;
+      const remote = pairReport.remoteCandidateId
+        ? (reports.get(pairReport.remoteCandidateId) as RTCStats & {
+            candidateType?: string;
+            protocol?: string;
+          })
+        : null;
+      localCandidateType = local?.candidateType ?? null;
+      remoteCandidateType = remote?.candidateType ?? null;
+      protocol = local?.protocol ?? remote?.protocol ?? null;
+    }
+  } catch {
+    // getStats can fail on closed connections; diagnostics stay null.
+  }
+  return {
+    mode,
+    localCandidateType,
+    remoteCandidateType,
+    protocol,
+    iceTransportPolicy: iceTransportPolicy ?? null,
+  };
+}
 
 export function makePeerConnection(
   ws: WebSocket,
@@ -228,6 +380,14 @@ export function makePeerConnection(
       if (connectedMode === "direct") {
         sendSignal(ws, { type: "mode", payload: { mode: "direct" } });
       }
+      void collectTransportDiagnostics(pc, connectedMode, options?.iceTransportPolicy).then(
+        (diagnostics) => {
+          handlers.onTransportDiagnostics?.(diagnostics);
+          if (typeof console !== "undefined") {
+            console.info("[p2pfile] transport", diagnostics);
+          }
+        },
+      );
       return;
     }
   });

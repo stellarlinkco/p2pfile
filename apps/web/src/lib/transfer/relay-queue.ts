@@ -2,7 +2,7 @@ import { assertRelayEnvelopeFitsCloudflareLimit, toRelayMessage } from "./relay-
 import type { BrowserSignalMessage, TransferProtocolMessage } from "./types";
 
 type PendingRelayMessage = {
-  envelope: BrowserSignalMessage & { type: "relay-message" };
+  wire: string | ArrayBuffer;
   reject: (error: Error) => void;
   resolve: () => void;
   sentAt: number;
@@ -24,17 +24,17 @@ export class RelayMessageQueue {
   private readonly commitTimeoutMs: number;
   private readonly pending = new Map<number, PendingRelayMessage>();
   private readonly pendingCommits = new Map<string, PendingChunkCommit>();
-  private readonly sendEnvelope: (message: BrowserSignalMessage) => void;
+  private readonly sendWire: (data: string | ArrayBuffer) => void;
   private readonly resendMs: number;
   private readonly timer: ReturnType<typeof setInterval>;
   private nextSequence = 0;
   private stopped = false;
 
   constructor(
-    sendEnvelope: (message: BrowserSignalMessage) => void,
+    sendWire: (data: string | ArrayBuffer) => void,
     options?: { ackTimeoutMs?: number; commitTimeoutMs?: number; resendMs?: number },
   ) {
-    this.sendEnvelope = sendEnvelope;
+    this.sendWire = sendWire;
     this.ackTimeoutMs = options?.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS;
     this.commitTimeoutMs = options?.commitTimeoutMs ?? DEFAULT_COMMIT_TIMEOUT_MS;
     this.resendMs = options?.resendMs ?? DEFAULT_RESEND_MS;
@@ -46,7 +46,7 @@ export class RelayMessageQueue {
         }
 
         entry.sentAt = now;
-        this.sendEnvelope(entry.envelope);
+        this.sendWire(entry.wire);
       }
     }, this.resendMs);
   }
@@ -59,6 +59,9 @@ export class RelayMessageQueue {
     const sequence = this.nextSequence;
     this.nextSequence += 1;
 
+    // Relay always uses JSON envelopes on the signaling WebSocket. Binary frames
+    // are reserved for Direct DataChannel; signal/redis paths must remain
+    // text-safe so receiver reload can recover over Relayed Transfer.
     const envelope: BrowserSignalMessage & { type: "relay-message" } = {
       type: "relay-message",
       payload: {
@@ -67,10 +70,11 @@ export class RelayMessageQueue {
       },
     };
     assertRelayEnvelopeFitsCloudflareLimit(envelope);
+    const wire = JSON.stringify(envelope);
 
     const { promise, reject, resolve } = Promise.withResolvers<void>();
     const pending: PendingRelayMessage = {
-      envelope,
+      wire,
       reject,
       resolve,
       sentAt: Date.now(),
@@ -87,7 +91,7 @@ export class RelayMessageQueue {
     };
 
     this.pending.set(sequence, pending);
-    this.sendEnvelope(envelope);
+    this.sendWire(wire);
     return promise;
   }
 

@@ -1,6 +1,6 @@
 import type { RelayMessageQueue } from "./relay-queue";
 import { fromRelayMessage } from "./relay-runtime";
-import { applyMode, parseSignalMessage, sendSignal } from "./runtime-shared";
+import { applyMode, parseSignalWire, sendSignal } from "./runtime-shared";
 import type { BrowserSignalMessage, SenderRuntimeHandlers } from "./types";
 
 type SenderSignalHandlerContext = {
@@ -20,8 +20,17 @@ type SenderSignalHandlerContext = {
 
 export function attachSenderSignalHandler(context: SenderSignalHandlerContext): void {
   context.ws.addEventListener("message", async (event) => {
-    const message = parseSignalMessage(event);
-    if (!message || context.isStopped()) return;
+    if (context.isStopped()) return;
+    const wire = parseSignalWire(event);
+    if (!wire) return;
+
+    if (wire.kind === "binary-relay-chunk") {
+      // Binary relay currently carries file chunks sender->receiver only.
+      // Receiver->sender binary is reserved for future commit frames.
+      return;
+    }
+
+    const message = wire.message;
     if (message.type === "receiver-ready") {
       context.handleReceiverReady(message.payload);
       return;

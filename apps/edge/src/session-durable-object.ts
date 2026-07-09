@@ -32,7 +32,7 @@ import {
   toPublicSession,
   writeSession,
 } from "./session-record";
-import { closeSockets, isRoleAllowedSignal, parseDirectSignal } from "./session-signaling";
+import { closeSockets, isRoleAllowedSignal, parseEdgeWire } from "./session-signaling";
 
 export class SessionDurableObject implements DurableObject {
   private readonly sockets: Partial<Record<SessionRole, WebSocket>> = {};
@@ -325,14 +325,26 @@ export class SessionDurableObject implements DurableObject {
     socket: WebSocket,
     event: MessageEvent,
   ) {
-    const envelope = parseDirectSignal(event.data);
+    const wire = parseEdgeWire(event.data);
+    if (!wire) {
+      socket.close(1003, "invalid signal message");
+      return;
+    }
+
+    if (wire.kind === "binary") {
+      // Opaque binary relay frames (chunk payloads) are forwarded in-flight only.
+      const peer = this.sockets[role === "sender" ? "receiver" : "sender"];
+      if (peer?.readyState === WebSocket.OPEN) peer.send(wire.bytes);
+      return;
+    }
+
+    const envelope = wire.envelope;
     const allowedRelayCommitSignal =
-      envelope &&
-      ((role === "receiver" &&
+      (role === "receiver" &&
         envelope.type === "relay-message" &&
         envelope.payload.message.type === "chunk-commit") ||
-        (role === "sender" && envelope.type === "relay-ack"));
-    if (!envelope || (!isRoleAllowedSignal(role, envelope) && !allowedRelayCommitSignal)) {
+      (role === "sender" && envelope.type === "relay-ack");
+    if (!isRoleAllowedSignal(role, envelope) && !allowedRelayCommitSignal) {
       socket.close(1003, "invalid signal message");
       return;
     }

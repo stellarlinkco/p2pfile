@@ -156,7 +156,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
           }
         },
         async onMessage(event, ws) {
-          if (!(await store.handleSignal(sessionId, role, token, event.data.toString()))) {
+          if (
+            !(await store.handleSignal(sessionId, role, token, event.data as string | ArrayBuffer))
+          ) {
             ws.close(1003, "invalid signal payload");
           }
         },

@@ -11,4 +11,5 @@ export type {
   TransferFileState,
   TransferProgress,
   TransferProtocolMessage,
+  TransportDiagnostics,
 } from "./transfer/types";

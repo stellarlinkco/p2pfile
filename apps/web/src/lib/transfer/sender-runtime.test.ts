@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
 import { RelayMessageQueue } from "./relay-queue";
+import { decodeBinaryRelayChunkFrame } from "./relay-runtime";
 import { shouldReuseDirectAttempt, startSenderRuntime } from "./sender-runtime";
 import { attachSenderSignalHandler } from "./sender-signal-handler";
 import type { BrowserSignalMessage, SenderRuntimeHandlers } from "./types";
@@ -205,26 +206,30 @@ class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
   readonly url: string;
   readyState = FakeWebSocket.OPEN;
-  sent: BrowserSignalMessage[] = [];
-  private readonly listeners = new Map<string, Set<(event: MessageEvent<string>) => void>>();
+  sent: Array<BrowserSignalMessage | ArrayBuffer> = [];
+  private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
 
   constructor(url: string) {
     this.url = url;
     FakeWebSocket.instances.push(this);
   }
 
-  addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+  addEventListener(type: string, listener: (event: MessageEvent) => void) {
     const current = this.listeners.get(type) ?? new Set();
     current.add(listener);
     this.listeners.set(type, current);
   }
 
-  removeEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+  removeEventListener(type: string, listener: (event: MessageEvent) => void) {
     this.listeners.get(type)?.delete(listener);
   }
 
-  send(data: string) {
-    this.sent.push(JSON.parse(data) as BrowserSignalMessage);
+  send(data: string | ArrayBuffer) {
+    if (typeof data === "string") {
+      this.sent.push(JSON.parse(data) as BrowserSignalMessage);
+      return;
+    }
+    this.sent.push(data);
   }
 
   close() {
@@ -241,7 +246,14 @@ class FakeWebSocket {
   }
 
   relayMessageCount() {
-    return this.sent.filter((message) => message.type === "relay-message").length;
+    return (
+      this.sent.filter(
+        (message) =>
+          typeof message !== "string" &&
+          !(message instanceof ArrayBuffer) &&
+          message.type === "relay-message",
+      ).length + this.sent.filter((message) => message instanceof ArrayBuffer).length
+    );
   }
 }
 
@@ -332,7 +344,12 @@ test("direct ICE failure with TURN configured renegotiates via a relay-only atte
       expect(FakePeerConnection.instances.length).toBe(2);
       expect(peer(1).config.iceTransportPolicy).toBe("relay");
       expect(socket().relayMessageCount()).toBe(0);
-      const offers = socket().sent.filter((message) => message.type === "offer");
+      const offers = socket().sent.filter(
+        (message): message is BrowserSignalMessage & { type: "offer" } =>
+          typeof message !== "string" &&
+          !(message instanceof ArrayBuffer) &&
+          message.type === "offer",
+      );
       expect(offers.length).toBe(2);
 
       runtime.stop();
@@ -492,7 +509,7 @@ test("signal socket close rebuilds direct transport when ICE already failed", as
   });
 });
 
-test("data channel close during a zip send falls back to ws relay", async () => {
+test("data channel close during a zip send waits for receiver-ready instead of ws relay", async () => {
   await withSenderHarness(undefined, async ({ errors, socket, peer, settle }) => {
     const file = {
       name: "archive-1000g.zip",
@@ -526,7 +543,31 @@ test("data channel close during a zip send falls back to ws relay", async () => 
     await Bun.sleep(20);
     await settle();
 
-    expect(socket().relayMessageCount()).toBeGreaterThan(0);
+    // Receiver reload closes the DataChannel mid-send. That must not force WS relay;
+    // recovery is owned by the next receiver-ready / ICE failure path.
+    expect(socket().relayMessageCount()).toBe(0);
+    expect(errors).toEqual([]);
+
+    socket().receive({
+      type: "receiver-ready",
+      payload: {
+        progress: {
+          manifestHash: `${manifest[0]?.id}:${manifest[0]?.name}:${manifest[0]?.size}`,
+          files: [
+            {
+              fileId: "file-1",
+              size: file.size,
+              chunkSize: MANIFEST_CHUNK_BYTES,
+              committedBytes: 0,
+              completed: false,
+            },
+          ],
+        },
+        receiverInstanceId: "receiver-after-reload",
+      },
+    });
+    await settle();
+    expect(FakePeerConnection.instances.length).toBeGreaterThanOrEqual(1);
     expect(errors).toEqual([]);
     runtime.stop();
   });
@@ -575,10 +616,22 @@ test("receiver restart resets an in-flight relay transfer when progress is uncha
           },
         ],
       };
-      const acknowledged = new Set<BrowserSignalMessage>();
+      const acknowledged = new Set<BrowserSignalMessage | ArrayBuffer>();
       const acknowledgeRelayMessages = async () => {
         for (let attempt = 0; attempt < 5; attempt += 1) {
           for (const message of socket().sent) {
+            if (message instanceof ArrayBuffer) {
+              if (acknowledged.has(message)) continue;
+              acknowledged.add(message);
+              const decoded = decodeBinaryRelayChunkFrame(message);
+              if (decoded) {
+                socket().receive({
+                  type: "relay-ack",
+                  payload: { sequence: decoded.sequence },
+                });
+              }
+              continue;
+            }
             if (message.type !== "relay-message" || acknowledged.has(message)) continue;
             acknowledged.add(message);
             socket().receive({
@@ -591,7 +644,10 @@ test("receiver restart resets an in-flight relay transfer when progress is uncha
       };
       const relayFileStarts = () =>
         socket().sent.flatMap((message) =>
-          message.type === "relay-message" && message.payload.message.type === "file-start"
+          typeof message !== "string" &&
+          !(message instanceof ArrayBuffer) &&
+          message.type === "relay-message" &&
+          message.payload.message.type === "file-start"
             ? [message.payload.message.offset]
             : [],
         );
@@ -609,21 +665,35 @@ test("receiver restart resets an in-flight relay transfer when progress is uncha
       });
       await acknowledgeRelayMessages();
 
-      const lastChunk = socket()
-        .sent.filter(
-          (message): message is BrowserSignalMessage & { type: "relay-message" } =>
-            message.type === "relay-message" && message.payload.message.type === "chunk",
-        )
-        .at(-1);
-      if (lastChunk?.payload.message.type === "chunk") {
+      let lastChunkFileId: string | null = null;
+      let lastChunkIndex: number | null = null;
+      for (const message of socket().sent) {
+        if (message instanceof ArrayBuffer) {
+          const decoded = decodeBinaryRelayChunkFrame(message);
+          if (decoded) {
+            lastChunkFileId = decoded.message.fileId;
+            lastChunkIndex = decoded.message.chunkIndex;
+          }
+          continue;
+        }
+        if (
+          typeof message !== "string" &&
+          message.type === "relay-message" &&
+          message.payload.message.type === "chunk"
+        ) {
+          lastChunkFileId = message.payload.message.fileId;
+          lastChunkIndex = message.payload.message.chunkIndex;
+        }
+      }
+      if (lastChunkFileId !== null && lastChunkIndex !== null) {
         socket().receive({
           type: "relay-message",
           payload: {
             sequence: 1000,
             message: {
               type: "chunk-commit",
-              fileId: lastChunk.payload.message.fileId,
-              chunkIndex: lastChunk.payload.message.chunkIndex,
+              fileId: lastChunkFileId,
+              chunkIndex: lastChunkIndex,
               committedBytes: MANIFEST_CHUNK_BYTES * 2,
             },
           },

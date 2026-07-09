@@ -1,5 +1,9 @@
 import { type SessionRole, type SignalEnvelope, SignalEnvelopeSchema } from "@p2pfile/shared";
 
+export type ParsedEdgeWire =
+  | { kind: "json"; envelope: SignalEnvelope }
+  | { kind: "binary"; bytes: ArrayBuffer };
+
 export function parseDirectSignal(data: unknown): SignalEnvelope | null {
   if (typeof data !== "string") return null;
   try {
@@ -8,6 +12,23 @@ export function parseDirectSignal(data: unknown): SignalEnvelope | null {
   } catch {
     return null;
   }
+}
+
+export function parseEdgeWire(data: unknown): ParsedEdgeWire | null {
+  if (typeof data === "string") {
+    const envelope = parseDirectSignal(data);
+    return envelope ? { kind: "json", envelope } : null;
+  }
+  if (data instanceof ArrayBuffer) {
+    return { kind: "binary", bytes: data };
+  }
+  if (ArrayBuffer.isView(data)) {
+    const view = data as ArrayBufferView;
+    const copy = new Uint8Array(view.byteLength);
+    copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    return { kind: "binary", bytes: copy.buffer };
+  }
+  return null;
 }
 
 export function isRoleAllowedSignal(role: SessionRole, envelope: SignalEnvelope) {

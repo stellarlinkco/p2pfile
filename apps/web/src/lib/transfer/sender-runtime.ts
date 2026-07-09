@@ -47,7 +47,7 @@ export async function startSenderRuntime(
   let ws = openSenderSignalSocket(sessionId, senderToken);
   const relayOnly = preferRelayInTests();
   const plan = buildTransferPlan(files, manifest);
-  const queue = new RelayMessageQueue((message) => sendSignal(ws, message));
+  const queue = new RelayMessageQueue((data) => sendSignal(ws, data));
   let stopped = false;
   let completed = false;
   let transferring = false;
@@ -118,13 +118,17 @@ export async function startSenderRuntime(
     if (stopped || completed) return;
     const message = error instanceof Error ? error.message : "传输失败。";
     if (message === "Transfer restarted.") return;
-    transferring = false;
-    queue.reset();
+    // A receiver reload closes the old data channel while a send is in flight.
+    // That is not a transport/ICE failure; the next receiver-ready path owns recovery.
     if (message === "Data channel is not open.") {
-      fallback.markDirectFailed();
-      continueFallback();
+      transferring = false;
+      queue.reset();
+      // Keep current peer attempt reusable when possible; otherwise receiver-ready
+      // will call createDirectAttempt().
       return;
     }
+    transferring = false;
+    queue.reset();
     handlers.onError(message);
   };
 
@@ -281,6 +285,12 @@ export async function startSenderRuntime(
     }
     const progressChanged = updateReceiverProgress(payload.progress, receiverRestarted);
     if (completed || stopped) return;
+    if (receiverRestarted) {
+      // A new receiver instance must not inherit a prior WS-relay decision caused by
+      // the old peer closing its DataChannel mid-send.
+      fallback.clearDirectFailure();
+      fallback.stopRelayMode();
+    }
     if (transferring && !receiverProgressIsComplete() && (progressChanged || receiverRestarted)) {
       transferring = false;
       queue.reset();

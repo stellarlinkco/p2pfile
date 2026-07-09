@@ -64,7 +64,9 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
           </div>
           {flow.error ? <p className="mt-2 text-rose-700 text-sm">{flow.error}</p> : null}
         </section>
-        {hideLivePanels ? null : <ModeDisclosure mode={flow.mode} />}
+        {hideLivePanels ? null : (
+          <ModeDisclosure mode={flow.mode} diagnostics={flow.transportDiagnostics} />
+        )}
         {hideLivePanels ? null : <ProgressPanel progress={flow.progress} speed={flow.speed} />}
         <div data-testid="current-file-progress" className="hidden" />
         <div data-testid="overall-progress" className="hidden" />

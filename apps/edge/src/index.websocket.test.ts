@@ -99,7 +99,11 @@ test("SessionObject WebSockets forward validated Direct Transfer signaling only 
     payload: { completedFiles: 0, progress: resumeProgressFromManifest(manifest) },
   };
   receiver.send(JSON.stringify(ready));
-  expect(sender.received.map((message) => JSON.parse(message))).toEqual([ready]);
+  expect(
+    sender.received
+      .filter((message): message is string => typeof message === "string")
+      .map((message) => JSON.parse(message)),
+  ).toEqual([ready]);
   expect(receiver.received).toEqual([]);
 
   const offer = { type: "offer", payload: { type: "offer", sdp: "v=0" } };
@@ -182,6 +186,39 @@ test("SessionObject relays transfer frames in-flight without writing chunks to s
   expect(durableWrites).not.toContain("relay-ready");
 });
 
+test("SessionObject forwards opaque binary relay frames without durable storage", async () => {
+  const storageMutations: StorageMutation[] = [];
+  const env = createEnv(createDurableObjectsWithStorageTrace(storageMutations));
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+  const claim = await claimReceiver(env, session.sessionId);
+
+  const senderUpgrade = await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+    env,
+  );
+  expect(senderUpgrade.status).toBe(101);
+  const receiverUpgrade = await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+    env,
+  );
+  expect(receiverUpgrade.status).toBe(101);
+
+  const senderServer = pairs[0]?.server;
+  const receiverClient = pairs[1]?.client;
+  if (!senderServer || !receiverClient) throw new Error("expected websocket pair");
+
+  const binary = new Uint8Array([0x52, 0x01, 0, 0, 0, 9, 1, 2, 3, 4]).buffer;
+  senderServer.dispatchEvent(new MessageEvent("message", { data: binary }));
+
+  const received = receiverClient.received.at(-1);
+  expect(received instanceof ArrayBuffer).toBe(true);
+  expect(new Uint8Array(received as ArrayBuffer)).toEqual(new Uint8Array(binary));
+  const durableWrites = JSON.stringify(storageMutations);
+  expect(durableWrites).not.toContain("0x52");
+});
+
 test("SessionObject forwards receiver relay chunk-commit separately from relay delivery ack", async () => {
   const storageMutations: StorageMutation[] = [];
   const env = createEnv(createDurableObjectsWithStorageTrace(storageMutations));
@@ -223,12 +260,18 @@ test("SessionObject forwards receiver relay chunk-commit separately from relay d
 
   receiver.send(JSON.stringify(relayAck));
   receiver.send(JSON.stringify(relayCommit));
-  expect(sender.received.map((message) => JSON.parse(message))).toEqual([relayAck, relayCommit]);
+  expect(
+    sender.received
+      .filter((message): message is string => typeof message === "string")
+      .map((message) => JSON.parse(message)),
+  ).toEqual([relayAck, relayCommit]);
 
   sender.send(JSON.stringify({ type: "relay-ack", payload: { sequence: 11 } }));
-  expect(receiver.received.map((message) => JSON.parse(message))).toEqual([
-    { type: "relay-ack", payload: { sequence: 11 } },
-  ]);
+  expect(
+    receiver.received
+      .filter((message): message is string => typeof message === "string")
+      .map((message) => JSON.parse(message)),
+  ).toEqual([{ type: "relay-ack", payload: { sequence: 11 } }]);
   expect(sender.closed).toBeNull();
   expect(receiver.closed).toBeNull();
 

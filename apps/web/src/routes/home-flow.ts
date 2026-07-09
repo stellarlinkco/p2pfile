@@ -7,7 +7,7 @@ import {
   type SessionPublicView,
   sendEndSessionBeacon,
 } from "../lib/api";
-import type { SenderRuntime, TransferProgress } from "../lib/transfer";
+import type { SenderRuntime, TransferProgress, TransportDiagnostics } from "../lib/transfer";
 import { startSenderRuntime } from "../lib/transfer";
 
 export type SenderStage =
@@ -39,6 +39,7 @@ export type SenderFlowState = {
   stage: SenderStage;
   status: string;
   totalBytes: number;
+  transportDiagnostics: TransportDiagnostics | null;
 };
 
 function manifestFromFiles(files: File[]) {
@@ -76,6 +77,9 @@ export function useSenderFlow(): SenderFlowState {
   const [error, setError] = useState<string | null>(null);
   const [shareState, setShareState] = useState<SenderShareState | null>(null);
   const [mode, setMode] = useState<TransferMode | null>(null);
+  const [transportDiagnostics, setTransportDiagnostics] = useState<TransportDiagnostics | null>(
+    null,
+  );
   const [progress, setProgress] = useState<TransferProgress>(progressFromFiles([]));
   const [speed, setSpeed] = useState<number | null>(null);
   const runtimeRef = useRef<SenderRuntime | null>(null);
@@ -131,6 +135,7 @@ export function useSenderFlow(): SenderFlowState {
     setStage("creating");
     setStatus("正在冻结文件清单并创建会话…");
     setMode(null);
+    setTransportDiagnostics(null);
     setSpeed(null);
     sampleRef.current = null;
     setProgress(progressFromFiles(selectedFiles));
@@ -167,6 +172,9 @@ export function useSenderFlow(): SenderFlowState {
           },
           onMode(nextMode) {
             setMode(nextMode);
+          },
+          onTransportDiagnostics(nextDiagnostics) {
+            setTransportDiagnostics(nextDiagnostics);
           },
           onProgress(nextProgress) {
             setProgress(nextProgress);
@@ -241,5 +249,6 @@ export function useSenderFlow(): SenderFlowState {
     stage,
     status,
     totalBytes,
+    transportDiagnostics,
   };
 }

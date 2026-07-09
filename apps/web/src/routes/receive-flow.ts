@@ -3,7 +3,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { releaseSession, resolveAccessCode, type SessionPublicView } from "../lib/api";
 import { clearReceiverToken, readReceiverToken } from "../lib/session-storage";
-import type { ReceivedFile, ReceiverRuntime, TransferProgress } from "../lib/transfer";
+import type {
+  ReceivedFile,
+  ReceiverRuntime,
+  TransferProgress,
+  TransportDiagnostics,
+} from "../lib/transfer";
 import { claimReceiverSession } from "./receive-flow-claim";
 import {
   clearReceivedFiles,
@@ -29,6 +34,9 @@ export function useReceiveFlow(): ReceiveFlowState {
     "粘贴 Share Link 或 Access Code，先查看 Frozen Manifest 再 claim。",
   );
   const [mode, setMode] = useState<TransferMode | null>(null);
+  const [transportDiagnostics, setTransportDiagnostics] = useState<TransportDiagnostics | null>(
+    null,
+  );
   const [progress, setProgress] = useState<TransferProgress>(initialProgress(null));
   const [speed, setSpeed] = useState<number | null>(null);
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
@@ -124,6 +132,7 @@ export function useReceiveFlow(): ReceiveFlowState {
     }
   }
   async function claimCurrentSession() {
+    setTransportDiagnostics(null);
     await claimReceiverSession({
       session,
       currentReceiverToken: session ? readReceiverToken(session.sessionId) : null,
@@ -139,6 +148,7 @@ export function useReceiveFlow(): ReceiveFlowState {
       setReceivedFiles,
       setRetriesRemaining,
       setError,
+      setTransportDiagnostics,
     });
   }
 
@@ -188,5 +198,6 @@ export function useReceiveFlow(): ReceiveFlowState {
     speed,
     stage,
     status,
+    transportDiagnostics,
   };
 }

@@ -1,6 +1,6 @@
 import type { TransferMode } from "@p2pfile/shared";
 import type { SessionPublicView } from "../lib/api";
-import type { ReceivedFile, TransferProgress } from "../lib/transfer";
+import type { ReceivedFile, TransferProgress, TransportDiagnostics } from "../lib/transfer";
 import type { ReceiverStage } from "./receive-flow-utils";
 
 export type ReceiveFlowState = {
@@ -18,4 +18,5 @@ export type ReceiveFlowState = {
   speed: number | null;
   stage: ReceiverStage;
   status: string;
+  transportDiagnostics: TransportDiagnostics | null;
 };

@@ -7,7 +7,7 @@ import {
   formatRelativeTime,
   formatSpeed,
 } from "../lib/format";
-import type { TransferFileProgress, TransferProgress } from "../lib/transfer";
+import type { TransferFileProgress, TransferProgress, TransportDiagnostics } from "../lib/transfer";
 
 const panelClass = "min-w-0 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm";
 
@@ -190,8 +190,25 @@ type ManifestPanelProps = {
   fileProgress?: TransferFileProgress[];
 };
 
-export function ModeDisclosure({ mode }: { mode: TransferMode | null }) {
+export function ModeDisclosure({
+  mode,
+  diagnostics = null,
+}: {
+  mode: TransferMode | null;
+  diagnostics?: TransportDiagnostics | null;
+}) {
   const formattedMode = formatMode(mode);
+  const pathLabel = diagnostics
+    ? [
+        diagnostics.localCandidateType ?? "unknown",
+        "→",
+        diagnostics.remoteCandidateType ?? "unknown",
+        diagnostics.protocol ? `(${diagnostics.protocol})` : null,
+        diagnostics.iceTransportPolicy === "relay" ? "TURN-only" : null,
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : null;
 
   return (
     <section className={panelClass} data-testid="mode-disclosure">
@@ -203,6 +220,11 @@ export function ModeDisclosure({ mode }: { mode: TransferMode | null }) {
       </div>
       <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4">
         <p className="font-semibold">优先直连，必要时自动切到中继。</p>
+        {pathLabel ? (
+          <p className="mt-2 text-neutral-600 text-sm" data-testid="transport-path">
+            路径：{pathLabel}
+          </p>
+        ) : null}
       </div>
     </section>
   );

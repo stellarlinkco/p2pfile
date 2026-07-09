@@ -31,7 +31,7 @@ export function HomePageView({ sender }: HomePageViewProps) {
       <div className="grid min-h-[calc(100vh-190px)] gap-3 xl:grid-cols-[1fr_1fr_0.94fr]">
         <section className="grid min-w-0 grid-cols-1 content-start gap-3">
           <SenderPanel sender={sender} />
-          <ModeDisclosure mode={sender.mode} />
+          <ModeDisclosure mode={sender.mode} diagnostics={sender.transportDiagnostics} />
           <div data-testid="current-file-progress">
             <ProgressPanel progress={sender.progress} speed={sender.speed} />
           </div>

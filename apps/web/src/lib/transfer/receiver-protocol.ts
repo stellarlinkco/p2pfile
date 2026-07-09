@@ -5,6 +5,7 @@ import {
   resumeProgressFromManifest,
 } from "@p2pfile/shared";
 import { createSha256Digest, type Sha256Digest } from "./digest";
+import { createReceiverSink, type ReceiverSink } from "./receiver-sinks";
 import type {
   ReceivedFile,
   ReceiverRuntimeHandlers,
@@ -12,127 +13,6 @@ import type {
   TransferFileState,
   TransferProtocolMessage,
 } from "./types";
-
-const SMALL_FILE_BLOB_LIMIT = 1024 * 1024;
-const SINK_READ_CHUNK_BYTES = MANIFEST_CHUNK_BYTES;
-
-type ReceiverSink = {
-  readonly committedBytes: number;
-  write: (offset: number, bytes: ArrayBuffer, file: FileManifestItem) => Promise<void>;
-  updateDigest: (
-    offset: number,
-    length: number,
-    file: FileManifestItem,
-    digest: Sha256Digest,
-  ) => Promise<number>;
-  finalize: (file: FileManifestItem) => Promise<ReceivedFile>;
-  reset: () => void;
-};
-
-class MemoryBlobSink implements ReceiverSink {
-  private readonly chunks = new Map<number, ArrayBuffer>();
-  committedBytes = 0;
-
-  async write(offset: number, bytes: ArrayBuffer) {
-    this.chunks.set(offset, bytes.slice(0));
-    this.committedBytes = offset + bytes.byteLength;
-  }
-
-  async read(offset: number, length: number) {
-    const chunks = [...this.chunks.entries()].sort(([left], [right]) => left - right);
-    const result = new Uint8Array(length);
-    let copied = 0;
-    for (const [chunkOffset, bytes] of chunks) {
-      if (copied >= length) break;
-      if (chunkOffset + bytes.byteLength <= offset) continue;
-      if (chunkOffset > offset + copied) break;
-      const start = Math.max(0, offset + copied - chunkOffset);
-      const available = Math.min(bytes.byteLength - start, length - copied);
-      result.set(new Uint8Array(bytes, start, available), copied);
-      copied += available;
-    }
-    return copied === length ? result.buffer : new ArrayBuffer(0);
-  }
-  async updateDigest(
-    offset: number,
-    length: number,
-    _file: FileManifestItem,
-    digest: Sha256Digest,
-  ) {
-    let readBytes = 0;
-    while (readBytes < length) {
-      const chunkLength = Math.min(SINK_READ_CHUNK_BYTES, length - readBytes);
-      const bytes = await this.read(offset + readBytes, chunkLength);
-      if (bytes.byteLength === 0) break;
-      digest.update(bytes);
-      readBytes += bytes.byteLength;
-      if (bytes.byteLength < chunkLength) break;
-    }
-    return readBytes;
-  }
-
-  async finalize(file: FileManifestItem) {
-    const chunks = [...this.chunks.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([, bytes]) => bytes);
-    const blob = new Blob(chunks, { type: file.mimeType });
-    return { id: file.id, name: file.name, size: file.size, blob, url: URL.createObjectURL(blob) };
-  }
-
-  reset() {
-    this.chunks.clear();
-    this.committedBytes = 0;
-  }
-}
-
-class OpfsSink implements ReceiverSink {
-  private filePromise: Promise<FileSystemFileHandle> | null = null;
-  committedBytes = 0;
-
-  constructor(private readonly sessionId: string) {}
-
-  private file(file: FileManifestItem) {
-    this.filePromise ??= navigator.storage.getDirectory().then((root) =>
-      root.getFileHandle(`p2pfile-${this.sessionId}-${file.id}-${file.size}.part`, {
-        create: true,
-      }),
-    );
-    return this.filePromise;
-  }
-
-  async write(offset: number, bytes: ArrayBuffer, file: FileManifestItem) {
-    const handle = await this.file(file);
-    const writable = await handle.createWritable({ keepExistingData: true });
-    await writable.write({ type: "write", position: offset, data: bytes });
-    await writable.close();
-    this.committedBytes = offset + bytes.byteLength;
-  }
-
-  async updateDigest(offset: number, length: number, file: FileManifestItem, digest: Sha256Digest) {
-    const blob = await (await this.file(file)).getFile();
-    let readBytes = 0;
-    while (readBytes < length) {
-      const chunkLength = Math.min(SINK_READ_CHUNK_BYTES, length - readBytes);
-      const bytes = await blob
-        .slice(offset + readBytes, offset + readBytes + chunkLength)
-        .arrayBuffer();
-      if (bytes.byteLength === 0) break;
-      digest.update(bytes);
-      readBytes += bytes.byteLength;
-      if (bytes.byteLength < chunkLength) break;
-    }
-    return readBytes;
-  }
-
-  async finalize(file: FileManifestItem) {
-    const blob = await (await this.file(file)).getFile();
-    return { id: file.id, name: file.name, size: file.size, blob, url: URL.createObjectURL(blob) };
-  }
-
-  reset() {
-    this.committedBytes = 0;
-  }
-}
 
 type ReceiverFileContext = {
   bytes: number;
@@ -232,14 +112,8 @@ function manifestMatchesExpected(expected: FileManifestItem[], received: FileMan
   });
 }
 
-function canUseOpfs() {
-  return typeof navigator !== "undefined" && typeof navigator.storage?.getDirectory === "function";
-}
-
 function createSink(file: FileManifestItem, sessionId: string): ReceiverSink {
-  if (file.size <= SMALL_FILE_BLOB_LIMIT) return new MemoryBlobSink();
-  if (canUseOpfs()) return new OpfsSink(sessionId);
-  throw new Error("Large-file receiver storage unavailable.");
+  return createReceiverSink(file, sessionId);
 }
 
 function syncLegacyCurrent(state: ReceiverProtocolState, context: ReceiverFileContext | null) {
@@ -280,9 +154,10 @@ function failReceiverState(state: ReceiverProtocolState, message: string): never
   throw new Error(message);
 }
 
-async function digestHex(bytes: ArrayBuffer) {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+function digestHex(bytes: ArrayBuffer) {
+  const digest = createSha256Digest();
+  digest.update(bytes);
+  return digest.digestHex();
 }
 
 type ProtocolOptions = {
@@ -421,7 +296,7 @@ export async function handleProtocolMessage(
     if (chunkOffset !== context.bytes || chunkIndex !== context.chunkIndex) {
       failReceiverState(state, "Sender sent a chunk at the wrong offset.");
     }
-    if (!message.chunkDigest || (await digestHex(message.bytes)) !== message.chunkDigest) {
+    if (!message.chunkDigest || digestHex(message.bytes) !== message.chunkDigest) {
       failReceiverState(state, "Chunk integrity verification failed.");
     }
     await context.sink?.write(chunkOffset, message.bytes, context.file);
@@ -429,7 +304,10 @@ export async function handleProtocolMessage(
     context.bytes += message.bytes.byteLength;
     context.chunkIndex += 1;
     context.state = "receiving";
-    state.committedBytesByFileId.set(message.fileId, context.bytes);
+    // Resume / receiver-ready must not advance past OPFS durable checkpoints.
+    // Pipeline acks still use context.bytes so sender in-flight can progress.
+    const durableBytes = context.sink?.durableBytes ?? context.bytes;
+    state.committedBytesByFileId.set(message.fileId, durableBytes);
     syncLegacyCurrent(state, context);
     options.onChunkCommit?.({
       type: "chunk-commit",
@@ -475,7 +353,7 @@ export async function handleProtocolMessage(
       state.currentChunkIndex = nextContext?.chunkIndex ?? 0;
     }
     emitProgress(state, handlers, context.file);
-    handlers.onFileReceived(file);
+    await handlers.onFileReceived(file);
     return;
   }
 

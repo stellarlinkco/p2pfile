@@ -283,6 +283,11 @@ test.describe("P2P File v1 session flow", () => {
         undefined,
         { timeout: 30_000 },
       );
+      // Wait for the receiver-visible completed state before reload so IndexedDB
+      // caching of the finished first file is durable across the page reopen.
+      await expect(receiver.getByTestId("file-state-local-1")).toContainText("completed", {
+        timeout: 15_000,
+      });
       expect(firstCommittedBytes).toBeGreaterThan(0);
       expect(firstCommittedBytes).toBeLessThan(files[1].buffer.byteLength);
 

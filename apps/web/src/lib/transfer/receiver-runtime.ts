@@ -10,7 +10,7 @@ import {
   handleProtocolMessage,
   makePeerConnection,
   parseProtocolMessage,
-  parseSignalMessage,
+  parseSignalWire,
   preferRelayInTests,
   relayAvailable,
   sendSignal,
@@ -216,7 +216,16 @@ export async function startReceiverRuntime(
     const channel = event.channel;
     activeDirectChannels.add(channel);
     channel.binaryType = "arraybuffer";
-    channel.addEventListener("close", () => activeDirectChannels.delete(channel), { once: true });
+    channel.addEventListener(
+      "close",
+      () => {
+        activeDirectChannels.delete(channel);
+        if (activeDirectChannels.size === 0) {
+          dataChannelOpen = false;
+        }
+      },
+      { once: true },
+    );
     channel.addEventListener("open", () => {
       dataChannelOpen = true;
       if (!relayRequested) {
@@ -236,15 +245,18 @@ export async function startReceiverRuntime(
         return;
       }
 
-      if (dataEvent.data instanceof ArrayBuffer && state.currentFile) {
-        handleTransferMessage({
-          type: "chunk",
-          fileId: state.currentFile.id,
-          chunkIndex: Math.floor(state.currentBytes / (64 * 1024)),
-          offset: state.currentBytes,
-          bytes: dataEvent.data,
-          chunkDigest: "",
-        });
+      const raw = dataEvent.data;
+      if (raw instanceof ArrayBuffer) {
+        const message = parseProtocolMessage(raw);
+        if (message) handleTransferMessage(message);
+        return;
+      }
+      if (ArrayBuffer.isView(raw)) {
+        const view = raw as ArrayBufferView;
+        const copy = new Uint8Array(view.byteLength);
+        copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+        const message = parseProtocolMessage(copy.buffer);
+        if (message) handleTransferMessage(message);
       }
     });
   });
@@ -256,11 +268,22 @@ export async function startReceiverRuntime(
   });
 
   ws.addEventListener("message", async (event) => {
-    const message = parseSignalMessage(event);
-    if (!message || stopped) {
+    if (stopped) {
+      return;
+    }
+    const wire = parseSignalWire(event);
+    if (!wire) {
       return;
     }
 
+    if (wire.kind === "binary-relay-chunk") {
+      stopRelayAnnouncements();
+      sendSignal(ws, { type: "relay-ack", payload: { sequence: wire.sequence } });
+      handleRelayMessage(wire.sequence, wire.message);
+      return;
+    }
+
+    const message = wire.message;
     if (message.type === "offer") {
       if (preferRelayInTests() || forceDirectFail()) {
         requestRelay();
@@ -284,11 +307,9 @@ export async function startReceiverRuntime(
 
     if (message.type === "mode") {
       if (message.payload.mode === "relay") {
-        if (dataChannelOpen) {
-          applyMode("relay", handlers);
-        } else {
-          requestRelay();
-        }
+        // Always enter the relay receive path. A stale dataChannelOpen from a
+        // closed Direct attempt must not keep commits on a dead DataChannel.
+        requestRelay();
         return;
       }
 

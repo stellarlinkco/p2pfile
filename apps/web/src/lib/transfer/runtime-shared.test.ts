@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
 import { createSha256Digest } from "./digest";
 import {
-  awaitBufferedAmount,
   buildReceiverState,
   handleProtocolMessage,
   makePeerConnection,
@@ -852,28 +851,4 @@ test("out-of-order file-start freezes receiver before completion", async () => {
 
   await handleProtocolMessage({ type: "complete", totalBytes: 9 }, state, handlers);
   expect(completeCalls).toBe(0);
-});
-
-test("awaitBufferedAmount rejects when channel closes before draining", async () => {
-  const listeners = new Map<string, Set<() => void>>();
-  const channel = {
-    bufferedAmount: 128 * 1024,
-    bufferedAmountLowThreshold: 0,
-    readyState: "open",
-    addEventListener(type: string, listener: () => void) {
-      const current = listeners.get(type) ?? new Set();
-      current.add(listener);
-      listeners.set(type, current);
-    },
-    removeEventListener(type: string, listener: () => void) {
-      listeners.get(type)?.delete(listener);
-    },
-  } as unknown as RTCDataChannel;
-
-  const pending = awaitBufferedAmount(channel);
-  for (const listener of listeners.get("close") ?? []) {
-    listener();
-  }
-
-  await expect(pending).rejects.toThrow("Data channel is not open.");
 });

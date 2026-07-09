@@ -13,6 +13,7 @@ export class SenderFallbackController {
   mode: SenderFallbackMode;
   private directFailed = false;
   private relayModeTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly relayOnly: boolean;
   private turnAttempted = false;
   private wsRelayFailed = false;
 
@@ -20,11 +21,22 @@ export class SenderFallbackController {
     relayOnly: boolean,
     private readonly handlers: SenderRuntimeHandlers,
   ) {
+    this.relayOnly = relayOnly;
     this.mode = relayOnly ? "ws-relay" : "direct";
   }
 
   markDirectFailed(): void {
     this.directFailed = true;
+  }
+
+  /** Receiver reload is not a transport failure; allow a fresh direct attempt. */
+  clearDirectFailure(): void {
+    this.directFailed = false;
+    this.wsRelayFailed = false;
+    // Keep intentional test/relay-only mode; only unwind failure-driven WS relay.
+    if (!this.relayOnly && this.mode === "ws-relay") {
+      this.mode = "direct";
+    }
   }
 
   markRelayFailed(): void {

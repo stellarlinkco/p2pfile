@@ -2,7 +2,12 @@ import type { TransferMode } from "@p2pfile/shared";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { claimSession, completeSession, type SessionPublicView } from "../lib/api";
 import { writeReceiverToken } from "../lib/session-storage";
-import type { ReceivedFile, ReceiverRuntime, TransferProgress } from "../lib/transfer";
+import type {
+  ReceivedFile,
+  ReceiverRuntime,
+  TransferProgress,
+  TransportDiagnostics,
+} from "../lib/transfer";
 import { startReceiverRuntime } from "../lib/transfer";
 import { clearReceivedFiles, stopReceiverRuntime } from "./receive-flow-cleanup";
 import {
@@ -37,6 +42,7 @@ type ClaimReceiverSessionOptions = {
   setReceivedFiles: Dispatch<SetStateAction<ReceivedFile[]>>;
   setRetriesRemaining: Dispatch<SetStateAction<number | null>>;
   setError: Dispatch<SetStateAction<string | null>>;
+  setTransportDiagnostics: Dispatch<SetStateAction<TransportDiagnostics | null>>;
 };
 
 export function resumeCommittedBytesByFileId(
@@ -66,6 +72,7 @@ export async function claimReceiverSession({
   setReceivedFiles,
   setRetriesRemaining,
   setError,
+  setTransportDiagnostics,
 }: ClaimReceiverSessionOptions) {
   if (!session) {
     return;
@@ -190,21 +197,36 @@ export async function claimReceiverSession({
           }
           setMode(nextMode);
         },
+        onTransportDiagnostics(nextDiagnostics) {
+          if (runtimeFinished) {
+            return;
+          }
+          setTransportDiagnostics(nextDiagnostics);
+        },
         onProgress(nextProgress) {
           if (runtimeFinished) {
             return;
           }
           setProgress(nextProgress);
           setStage((current) => nextReceiverStageAfterProgress(current, runtimeFinished));
-          cacheActiveReceiveProgress(
-            session.sessionId,
-            response.session.files,
-            nextProgress.fileId,
-            nextProgress.fileBytes,
-          );
+          // Cache OPFS durable checkpoints (128 KiB) so reload resume can start
+          // before the full multi-MiB window fills.
+          if (
+            nextProgress.fileId &&
+            nextProgress.fileBytes > 0 &&
+            (nextProgress.fileBytes % (64 * 1024 * 2) === 0 ||
+              nextProgress.fileBytes === nextProgress.fileTotalBytes)
+          ) {
+            cacheActiveReceiveProgress(
+              session.sessionId,
+              response.session.files,
+              nextProgress.fileId,
+              nextProgress.fileBytes,
+            );
+          }
           updateSpeed(nextProgress, sampleRef, setSpeed);
         },
-        onFileReceived(file) {
+        async onFileReceived(file) {
           if (runtimeFinished) {
             return;
           }
@@ -216,7 +238,7 @@ export async function claimReceiverSession({
             (manifestFile) => manifestFile.id === file.id,
           );
           if (manifestIndex >= 0) {
-            void cacheReceivedFile(session.sessionId, file, manifestIndex);
+            await cacheReceivedFile(session.sessionId, file, manifestIndex);
           }
         },
         onComplete() {
