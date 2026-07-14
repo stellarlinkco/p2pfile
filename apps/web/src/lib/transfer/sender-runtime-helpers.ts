@@ -282,6 +282,13 @@ export async function sendFilesViaRelay(
   scheduler?: Partial<TransferSchedulerOptions>,
 ) {
   const resume = normalizeResumeProgress(plan, coerceResumeProgress(plan, progress));
+  const pauseTarget = pauseAfterCompletedFiles();
+  // WS relay has higher RTT and retry cost than DataChannel. Eight 64 KiB
+  // chunks cover the relay RTT while retaining a bounded 512 KiB byte window.
+  const relayScheduler: Partial<TransferSchedulerOptions> = {
+    maxInFlightBytes: MANIFEST_CHUNK_BYTES * 8,
+    ...scheduler,
+  };
 
   handlers.onMode("relay");
   await sendScheduledTransfer(files, {
@@ -291,8 +298,9 @@ export async function sendFilesViaRelay(
     plan,
     progress: resume,
     recordEvent: recordTransferTestEvent,
-    scheduler,
+    scheduler: relayScheduler,
     shouldContinue,
+    shouldPause: (progress) => pauseTarget === completedFilesFromProgress(progress),
     transport: {
       complete: (totalBytes) => queue.send({ type: "complete", totalBytes }),
       endFile: (file, bytes, digest) =>
@@ -303,6 +311,9 @@ export async function sendFilesViaRelay(
           chunk.chunkIndex,
           chunk.offset + chunk.bytes.byteLength,
         );
+        // A receiver restart can reset this queue before delivery resolves.
+        // Keep the rejection observed until the scheduler awaits the same promise.
+        void commit.catch(() => undefined);
         await queue.send({
           type: "chunk",
           fileId: chunk.file.id,
@@ -311,6 +322,9 @@ export async function sendFilesViaRelay(
           bytes: chunk.bytes,
           chunkDigest: chunk.chunkDigest,
         });
+        // Start commit timeout only after delivery-ack so OPFS RTT is not
+        // charged against the transport RTT budget.
+        queue.armCommitTimeout(chunk.file.id, chunk.chunkIndex);
         return commit;
       },
       sendManifest: (nextPlan) =>

@@ -264,6 +264,17 @@ test("signal envelope validates relay frames and base64 chunk payloads", () => {
     chunkDigest: "0".repeat(64),
   });
   expect(relayAck.payload.sequence).toBe(7);
+  const relayNack = SignalEnvelopeSchema.parse({
+    type: "relay-nack",
+    payload: {
+      sequence: 7,
+      reason: "peer-unavailable",
+    },
+  });
+  expect(relayNack).toEqual({
+    type: "relay-nack",
+    payload: { sequence: 7, reason: "peer-unavailable" },
+  });
   expect(() =>
     SignalEnvelopeSchema.parse({
       type: "relay-message",

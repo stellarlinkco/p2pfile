@@ -13,12 +13,29 @@ type SenderSignalHandlerContext = {
     payload: Extract<BrowserSignalMessage, { type: "receiver-ready" }>["payload"],
   ) => void;
   markDirectFailed: () => void;
-  continueFallback: () => void;
+  startRelayTransfer: () => void;
   stopRelayMode: () => void;
   markCompleted: () => void;
 };
 
 export function attachSenderSignalHandler(context: SenderSignalHandlerContext): void {
+  const pendingIceCandidates: Array<{
+    pc: RTCPeerConnection;
+    candidate: RTCIceCandidateInit;
+  }> = [];
+
+  const applyPendingIceCandidates = async (pc: RTCPeerConnection) => {
+    while (pendingIceCandidates.length > 0) {
+      const pending = pendingIceCandidates.shift();
+      if (!pending || pending.pc !== pc) continue;
+      try {
+        await pc.addIceCandidate(pending.candidate);
+      } catch {
+        // Ignore a candidate from a superseded offer.
+      }
+    }
+  };
+
   context.ws.addEventListener("message", async (event) => {
     if (context.isStopped()) return;
     const wire = parseSignalWire(event);
@@ -40,6 +57,7 @@ export function attachSenderSignalHandler(context: SenderSignalHandlerContext): 
       if (pc && pc.remoteDescription === null) {
         try {
           await pc.setRemoteDescription(message.payload);
+          await applyPendingIceCandidates(pc);
         } catch {
           // Ignore stale answers from a superseded offer.
         }
@@ -49,6 +67,10 @@ export function attachSenderSignalHandler(context: SenderSignalHandlerContext): 
     if (message.type === "ice-candidate") {
       const pc = context.getPeerConnection();
       if (pc) {
+        if (pc.remoteDescription === null) {
+          pendingIceCandidates.push({ pc, candidate: message.payload });
+          return;
+        }
         try {
           await pc.addIceCandidate(message.payload);
         } catch {
@@ -61,13 +83,12 @@ export function attachSenderSignalHandler(context: SenderSignalHandlerContext): 
       applyMode(message.payload.mode, context.handlers);
       if (message.payload.mode === "relay") {
         context.markDirectFailed();
-        context.continueFallback();
       }
       return;
     }
     if (message.type === "relay-ready") {
       context.markDirectFailed();
-      context.continueFallback();
+      context.startRelayTransfer();
       return;
     }
     if (message.type === "relay-message") {
@@ -84,6 +105,10 @@ export function attachSenderSignalHandler(context: SenderSignalHandlerContext): 
     if (message.type === "relay-ack") {
       context.queue.acknowledge(message.payload.sequence);
       context.stopRelayMode();
+      return;
+    }
+    if (message.type === "relay-nack") {
+      context.queue.nack(message.payload.sequence, message.payload.reason ?? "peer-unavailable");
       return;
     }
     if (message.type === "transfer-complete") {

@@ -18,11 +18,12 @@ export class MemoryDurableObjectStorage {
   constructor(private readonly onMutation: (mutation: StorageMutation) => void = () => undefined) {}
 
   get<T>(key: string) {
-    return Promise.resolve(this.values.get(key) as T | undefined);
+    const value = this.values.get(key);
+    return Promise.resolve(value === undefined ? undefined : (structuredClone(value) as T));
   }
 
   put(key: string, value: unknown) {
-    this.values.set(key, value);
+    this.values.set(key, structuredClone(value));
     this.onMutation({ key, value });
     return Promise.resolve();
   }

@@ -31,6 +31,13 @@ export function parseEdgeWire(data: unknown): ParsedEdgeWire | null {
   return null;
 }
 
+export function relaySequenceFromBinaryWire(bytes: ArrayBuffer) {
+  if (bytes.byteLength < 6) return null;
+  const view = new DataView(bytes);
+  if (view.getUint8(0) !== 0x52 || view.getUint8(1) !== 0x01) return null;
+  return view.getUint32(2, false);
+}
+
 export function isRoleAllowedSignal(role: SessionRole, envelope: SignalEnvelope) {
   if (envelope.type === "mode" || envelope.type === "ice-candidate") return true;
   if (role === "sender") {

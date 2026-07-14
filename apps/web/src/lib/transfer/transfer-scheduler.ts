@@ -14,8 +14,8 @@ export type TransferSchedulerOptions = {
 
 export const DEFAULT_TRANSFER_SCHEDULER: TransferSchedulerOptions = {
   maxActiveFiles: 2,
-  // 16 chunks × 64 KiB = 1 MiB pipeline window. Keeps resume semantics while
-  // removing the single-chunk RTT ceiling for large files.
+  // 16 chunks × 64 KiB = 1 MiB pipeline window. It removes the single-chunk
+  // RTT ceiling while keeping receiver reload/reconnect recovery bounded.
   maxInFlightBytes: MANIFEST_CHUNK_BYTES * 16,
 };
 
@@ -320,7 +320,8 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
         pending.set(chunkOffset, { bytes: chunkBytes, length: chunkLength });
         pendingCommitsByFile.set(file.manifestItem.id, pending);
         await enqueueCommitApplication(file);
-        if (pending.size === 0) {
+        const current = pendingCommitsByFile.get(file.manifestItem.id);
+        if (current === pending && pending.size === 0) {
           pendingCommitsByFile.delete(file.manifestItem.id);
         }
       })
@@ -422,14 +423,40 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
     if (madeProgress) {
       continue;
     }
-    if (inFlight.size === 0) {
-      break;
+    if (inFlight.size > 0) {
+      await Promise.race(inFlight);
+      continue;
     }
-    await Promise.race(inFlight);
+
+    // No sends and no in-flight commits: finish any files whose durable
+    // offset reached EOF. Without this pass, a commit wave that completed
+    // between the finish check and the empty-inFlight break would skip
+    // file-end and jump straight to complete.
+    let finished = false;
+    for (const completed of [...activeFiles].filter((file) => file.offset >= file.file.size)) {
+      if (!activeFiles.includes(completed)) continue;
+      paused = await finishFile(completed);
+      finished = true;
+      if (paused) {
+        return;
+      }
+      await activateNextFiles();
+    }
+    if (finished) {
+      continue;
+    }
+    break;
   }
 
   if (inFlight.size > 0) {
     await Promise.all(inFlight);
+  }
+  for (const completed of [...activeFiles].filter((file) => file.offset >= file.file.size)) {
+    if (!activeFiles.includes(completed)) continue;
+    await finishFile(completed);
+  }
+  if (activeFiles.length > 0) {
+    throw new Error("Transfer stalled before file completion.");
   }
   assertActive();
   await options.transport.complete(options.plan.totalBytes);

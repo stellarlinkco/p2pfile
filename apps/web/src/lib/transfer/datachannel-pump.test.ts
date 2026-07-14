@@ -78,10 +78,16 @@ test("pumpDataChannelSend sends first then waits only under high water mark", as
   expect(sent).toHaveLength(1);
   expect(bufferedAmount).toBe(64 * 1024);
 
-  // Force above high-water mark so the pump waits for bufferedamountlow.
-  bufferedAmount = 2 * 1024 * 1024;
+  // The direct 1 MiB budget does not stall until SCTP exceeds that bound.
+  bufferedAmount = 768 * 1024;
   await pumpDataChannelSend(channel, payload);
   expect(sent).toHaveLength(2);
+  expect(bufferedAmount).toBe(832 * 1024);
+
+  // Above high-water mark the pump waits for bufferedamountlow.
+  bufferedAmount = 2 * 1024 * 1024;
+  await pumpDataChannelSend(channel, payload);
+  expect(sent).toHaveLength(3);
   expect(bufferedAmount).toBe(0);
 });
 

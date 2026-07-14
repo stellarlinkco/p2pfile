@@ -1,9 +1,13 @@
-import { type FileManifestItem, resumeProgressFromManifest } from "@p2pfile/shared";
+import {
+  type FileManifestItem,
+  resumeProgressFromManifest,
+  SENDER_RECONNECT_GRACE_MS,
+} from "@p2pfile/shared";
 import { getSignalUrl } from "../api";
-import { fromRelayMessage, toRelayMessage } from "./relay-runtime";
+import { RelayMessageQueue } from "./relay-queue";
+import { fromRelayMessage } from "./relay-runtime";
 import {
   applyMode,
-  awaitIceComplete,
   awaitSocketOpen,
   buildReceiverState,
   forceDirectFail,
@@ -16,7 +20,6 @@ import {
   sendSignal,
 } from "./runtime-shared";
 import type {
-  BrowserSignalMessage,
   ReceivedFile,
   ReceiverRuntime,
   ReceiverRuntimeHandlers,
@@ -61,27 +64,6 @@ function restoreProgressState(
   });
 }
 
-function progressFromState(
-  expectedManifest: FileManifestItem[],
-  completedFiles: ReceivedFile[],
-  committedBytesByFileId: ReadonlyMap<string, number>,
-) {
-  const committed = seedCommittedBytes(completedFiles, committedBytesByFileId);
-  return resumeProgressFromManifest(expectedManifest, committed);
-}
-
-function nextRelayEnvelope(
-  sequence: number,
-  message: TransferProtocolMessage,
-): BrowserSignalMessage & { type: "relay-message" } {
-  return {
-    type: "relay-message",
-    payload: {
-      sequence,
-      message: toRelayMessage(message),
-    },
-  };
-}
 function seedCommittedBytes(
   completedFiles: ReceivedFile[],
   committedBytesByFileId: ReadonlyMap<string, number>,
@@ -105,22 +87,59 @@ export async function startReceiverRuntime(
   committedBytesByFileId: ReadonlyMap<string, number> = new Map(),
 ): Promise<ReceiverRuntime> {
   const ws = new WebSocket(getSignalUrl(sessionId, "receiver", receiverToken));
+  ws.binaryType = "arraybuffer";
+  let relayCommitQueue: RelayMessageQueue | null = null;
   const pc = makePeerConnection(ws, handlers, "Connecting");
+  const pendingIceCandidates: RTCIceCandidateInit[] = [];
   const pendingRelayMessages = new Map<number, TransferProtocolMessage>();
   const seededCommittedBytes = seedCommittedBytes(receivedFiles, committedBytesByFileId);
   const state = buildReceiverState(expectedManifest, seededCommittedBytes, sessionId);
   let nextRelaySequence = 0;
-  let nextOutgoingRelaySequence = 0;
+  let relaySequenceInitialized = false;
   let relayRequested = false;
   let relayAnnounceTimer: ReturnType<typeof setInterval> | null = null;
   let dataChannelOpen = false;
   let stopped = false;
+  const getRelayCommitQueue = () => {
+    relayCommitQueue ??= new RelayMessageQueue((data) => ws.send(data), {
+      ackTimeoutMs: SENDER_RECONNECT_GRACE_MS + 1_000,
+    });
+    return relayCommitQueue;
+  };
+  const stopRelayCommitQueue = () => {
+    relayCommitQueue?.stop();
+    relayCommitQueue = null;
+  };
   const receiverInstanceId = makeReceiverInstanceId();
   if (seededCommittedBytes.size > 0) {
     restoreProgressState(expectedManifest, receivedFiles, handlers, seededCommittedBytes);
   }
 
+  const currentDurableProgress = () => {
+    const committed = new Map<string, number>();
+    for (const [fileId, bytes] of state.committedBytesByFileId) {
+      if (bytes > 0 || state.fileStates.get(fileId)?.state === "completed") {
+        committed.set(fileId, bytes);
+      }
+    }
+    return resumeProgressFromManifest(expectedManifest, committed);
+  };
+
+  const sendReceiverProgress = () => {
+    sendSignal(ws, {
+      type: "receiver-ready",
+      payload: {
+        progress: currentDurableProgress(),
+        completedFiles: state.receivedFiles,
+        receiverInstanceId,
+      },
+    });
+  };
+
   const announceRelay = () => {
+    // Progress must arrive first so a reattached relay sender cannot resend
+    // from an older acknowledged offset.
+    sendReceiverProgress();
     sendSignal(ws, { type: "mode", payload: { mode: "relay" } });
     sendSignal(ws, { type: "relay-ready", payload: {} });
   };
@@ -156,9 +175,11 @@ export async function startReceiverRuntime(
     try {
       await handleProtocolMessage(message, state, handlers, {
         onChunkCommit(ack) {
+          if (stopped) return;
           if (viaRelay || relayRequested) {
-            sendSignal(ws, nextRelayEnvelope(nextOutgoingRelaySequence, ack));
-            nextOutgoingRelaySequence += 1;
+            void getRelayCommitQueue()
+              .send(ack)
+              .catch(() => undefined);
             return;
           }
           if (dataChannelOpen) {
@@ -166,6 +187,7 @@ export async function startReceiverRuntime(
           }
         },
       });
+      if (stopped) return;
       if (message.type === "file-end") {
         sendSignal(ws, {
           type: "receiver-ready",
@@ -179,6 +201,7 @@ export async function startReceiverRuntime(
     } catch (error) {
       stopped = true;
       stopRelayAnnouncements();
+      stopRelayCommitQueue();
       pc.close();
       ws.close();
       handlers.onError(error instanceof Error ? error.message : "接收文件失败。");
@@ -188,6 +211,13 @@ export async function startReceiverRuntime(
   let processingChain = Promise.resolve();
 
   const handleRelayMessage = (sequence: number, message: TransferProtocolMessage) => {
+    if (!relaySequenceInitialized) {
+      if (message.type !== "manifest") {
+        return;
+      }
+      nextRelaySequence = sequence;
+      relaySequenceInitialized = true;
+    }
     if (sequence < nextRelaySequence) {
       if (sequence !== 0 || message.type !== "manifest") {
         return;
@@ -271,7 +301,11 @@ export async function startReceiverRuntime(
     if (stopped) {
       return;
     }
-    const wire = parseSignalWire(event);
+    const data = event.data instanceof Blob ? await event.data.arrayBuffer() : event.data;
+    if (stopped) {
+      return;
+    }
+    const wire = parseSignalWire({ data });
     if (!wire) {
       return;
     }
@@ -291,9 +325,12 @@ export async function startReceiverRuntime(
       }
 
       await pc.setRemoteDescription(message.payload);
+      while (pendingIceCandidates.length > 0) {
+        const candidate = pendingIceCandidates.shift();
+        if (candidate) await pc.addIceCandidate(candidate);
+      }
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      await awaitIceComplete(pc);
       if (pc.localDescription) {
         sendSignal(ws, { type: "answer", payload: pc.localDescription.toJSON() });
       }
@@ -301,7 +338,11 @@ export async function startReceiverRuntime(
     }
 
     if (message.type === "ice-candidate") {
-      await pc.addIceCandidate(message.payload);
+      if (pc.remoteDescription === null) {
+        pendingIceCandidates.push(message.payload);
+      } else {
+        await pc.addIceCandidate(message.payload);
+      }
       return;
     }
 
@@ -324,8 +365,14 @@ export async function startReceiverRuntime(
       return;
     }
 
+    if (message.type === "relay-ack") {
+      relayCommitQueue?.acknowledge(message.payload.sequence);
+      return;
+    }
+
     if (message.type === "transfer-complete") {
       stopRelayAnnouncements();
+      stopRelayCommitQueue();
       handlers.onComplete();
       return;
     }
@@ -336,19 +383,19 @@ export async function startReceiverRuntime(
     }
 
     if (message.type === "sender-left") {
+      stopRelayCommitQueue();
       handlers.onEnded();
     }
   });
 
-  await awaitSocketOpen(ws);
-  sendSignal(ws, {
-    type: "receiver-ready",
-    payload: {
-      progress: progressFromState(expectedManifest, receivedFiles, committedBytesByFileId),
-      completedFiles: receivedFiles.length,
-      receiverInstanceId,
-    },
+  ws.addEventListener("close", () => {
+    if (relayRequested || relayCommitQueue) stopped = true;
+    stopRelayAnnouncements();
+    stopRelayCommitQueue();
   });
+
+  await awaitSocketOpen(ws);
+  sendReceiverProgress();
 
   if (preferRelayInTests()) {
     requestRelay();
@@ -358,12 +405,14 @@ export async function startReceiverRuntime(
     stop() {
       stopped = true;
       stopRelayAnnouncements();
+      stopRelayCommitQueue();
       pc.close();
       ws.close();
     },
     release() {
       stopped = true;
       stopRelayAnnouncements();
+      stopRelayCommitQueue();
       pc.close();
       ws.close();
     },

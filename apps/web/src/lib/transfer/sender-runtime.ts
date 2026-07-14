@@ -3,7 +3,6 @@ import { getSession, getSignalUrl } from "../api";
 import { RelayMessageQueue } from "./relay-queue";
 import {
   applyMode,
-  awaitIceComplete,
   awaitSocketOpen,
   makePeerConnection,
   preferRelayInTests,
@@ -34,7 +33,10 @@ export function shouldReuseDirectAttempt(
 }
 
 function openSenderSignalSocket(sessionId: string, senderToken: string) {
-  return new WebSocket(getSignalUrl(sessionId, "sender", senderToken));
+  const ws = new WebSocket(getSignalUrl(sessionId, "sender", senderToken));
+  // Required for binary relay chunk frames; default "blob" drops them in parseSignalWire.
+  ws.binaryType = "arraybuffer";
+  return ws;
 }
 
 export async function startSenderRuntime(
@@ -118,13 +120,11 @@ export async function startSenderRuntime(
     if (stopped || completed) return;
     const message = error instanceof Error ? error.message : "传输失败。";
     if (message === "Transfer restarted.") return;
-    // A receiver reload closes the old data channel while a send is in flight.
-    // That is not a transport/ICE failure; the next receiver-ready path owns recovery.
-    if (message === "Data channel is not open.") {
+    // Receiver replacement can close Direct or temporarily invalidate Relay
+    // while a send is in flight. Fresh receiver-ready/relay-ready owns recovery.
+    if (message === "Data channel is not open." || message === "Relay peer unavailable.") {
       transferring = false;
       queue.reset();
-      // Keep current peer attempt reusable when possible; otherwise receiver-ready
-      // will call createDirectAttempt().
       return;
     }
     transferring = false;
@@ -159,11 +159,15 @@ export async function startSenderRuntime(
     }
   };
 
+  const requestRelayReady = () => {
+    fallback.startRelayMode(() => sendSignal(ws, { type: "mode", payload: { mode: "relay" } }));
+  };
+
   const continueFallback = () => {
     if (stopped || completed) return;
     fallback.continue({
       startTurnAttempt: () => createDirectAttempt("turn"),
-      startRelayTransfer: () => void beginRelayTransfer(),
+      startRelayTransfer: requestRelayReady,
     });
   };
 
@@ -185,11 +189,17 @@ export async function startSenderRuntime(
         handlers,
         receiverProgress,
         () => currentTransferActive(token),
-        updateReceiverProgress,
+        (progress) => {
+          if (!currentTransferActive(token)) return;
+          updateReceiverProgress(progress);
+        },
       );
       await waitForCompletedSessionView(token);
     } catch (error) {
-      if (error instanceof Error && error.message === "Transfer restarted.") {
+      if (
+        error instanceof Error &&
+        (error.message === "Transfer restarted." || error.message === "Relay peer unavailable.")
+      ) {
         handleTransferFailure(error);
         return;
       }
@@ -203,7 +213,6 @@ export async function startSenderRuntime(
     try {
       const offer = await nextPc.createOffer();
       await nextPc.setLocalDescription(offer);
-      await awaitIceComplete(nextPc);
       if (stopped || completed || pc !== nextPc) return;
       if (nextPc.localDescription) {
         sendSignal(ws, { type: "offer", payload: nextPc.localDescription.toJSON() });
@@ -279,26 +288,22 @@ export async function startSenderRuntime(
     recordSenderTestEvent({ type: "sender-receiver-ready", mode: fallback.mode });
     const nextInstanceId =
       typeof payload.receiverInstanceId === "string" ? payload.receiverInstanceId : null;
-    const receiverRestarted = nextInstanceId !== null && nextInstanceId !== receiverInstanceId;
+    const receiverRestarted = receiverInstanceId !== null && nextInstanceId !== receiverInstanceId;
     if (nextInstanceId !== null) {
       receiverInstanceId = nextInstanceId;
     }
     const progressChanged = updateReceiverProgress(payload.progress, receiverRestarted);
     if (completed || stopped) return;
-    if (receiverRestarted) {
-      // A new receiver instance must not inherit a prior WS-relay decision caused by
-      // the old peer closing its DataChannel mid-send.
-      fallback.clearDirectFailure();
-      fallback.stopRelayMode();
-    }
-    if (transferring && !receiverProgressIsComplete() && (progressChanged || receiverRestarted)) {
+    if (!receiverProgressIsComplete() && (receiverRestarted || (transferring && progressChanged))) {
+      // A restarted receiver must not retain an in-flight transfer or relay decision.
+      transferToken += 1;
       transferring = false;
       queue.reset();
       closeDirectTransport();
     }
     if (transferring) return;
     if (fallback.mode === "ws-relay") {
-      void beginRelayTransfer();
+      requestRelayReady();
       return;
     }
     if (shouldReuseDirectAttempt(pc, channel)) {
@@ -343,17 +348,12 @@ export async function startSenderRuntime(
       .then(() => {
         if (stopped || completed) return;
         if (resetDirectTransportIfNeeded()) return;
-        if (fallback.mode === "ws-relay") {
-          void beginRelayTransfer();
+        if (fallback.mode === "ws-relay" || relayOnly) {
+          fallback.stopRelayMode();
+          requestRelayReady();
           return;
         }
-        if (relayOnly) {
-          fallback.startRelayMode(() =>
-            sendSignal(ws, { type: "mode", payload: { mode: "relay" } }),
-          );
-        } else {
-          createDirectAttempt();
-        }
+        createDirectAttempt();
       })
       .catch((error) => {
         if (!stopped && !completed) {
@@ -373,12 +373,14 @@ export async function startSenderRuntime(
       getPeerConnection: () => pc,
       handleReceiverReady,
       markDirectFailed: () => fallback.markDirectFailed(),
-      continueFallback,
+      startRelayTransfer: () => void beginRelayTransfer(),
       stopRelayMode: () => fallback.stopRelayMode(),
       markCompleted,
     });
     signalSocket.addEventListener("close", () => {
-      if (signalSocket === ws) reattachSignalSocket();
+      if (stopped || completed || signalSocket !== ws) return;
+      // Transient signal drops reattach; peer loss surfaces via relay-nack / ack timeout.
+      reattachSignalSocket();
     });
   };
 
@@ -386,8 +388,7 @@ export async function startSenderRuntime(
 
   await awaitSocketOpen(ws);
   if (relayOnly) {
-    const sendRelayMode = () => sendSignal(ws, { type: "mode", payload: { mode: "relay" } });
-    fallback.startRelayMode(sendRelayMode);
+    requestRelayReady();
   } else {
     createDirectAttempt();
   }

@@ -8,6 +8,7 @@ import {
   SessionMutationResponseSchema,
 } from "@p2pfile/shared";
 import { resetEdgeSessionsForTests, type SessionDurableObject, setEdgeNowForTests } from "./index";
+import { createInitialSession, readSession, SESSION_STORAGE_KEY } from "./session-record";
 import {
   claimReceiver,
   createDurableObjects,
@@ -17,11 +18,25 @@ import {
   handleRequest,
   installFakeWebSocketPair,
   type MemoryDurableObjectNamespace,
+  MemoryDurableObjectStorage,
   manifest,
   request,
   type StorageMutation,
   websocketRequest,
 } from "./test-support";
+
+test("readSession normalizes relay generation fields from pre-upgrade records", async () => {
+  const storage = new MemoryDurableObjectStorage();
+  const legacy = createInitialSession(manifest) as Partial<ReturnType<typeof createInitialSession>>;
+  delete legacy.receiverGeneration;
+  delete legacy.relayReadyGeneration;
+  await storage.put(SESSION_STORAGE_KEY, legacy);
+
+  const session = await readSession(storage as unknown as DurableObjectStorage);
+
+  expect(session?.receiverGeneration).toBe(0);
+  expect(session?.relayReadyGeneration).toBeNull();
+});
 
 test("Completed Session View expires after its short-lived Durable Object alarm window", async () => {
   resetEdgeSessionsForTests();
@@ -166,16 +181,24 @@ test("SessionObject relays transfer frames in-flight without writing chunks to s
     },
   };
   const relayAck = { type: "relay-ack", payload: { sequence: 0 } };
+  storageMutations.length = 0;
 
   receiver.send(JSON.stringify(relayReady));
   expect(sender.received).toEqual([JSON.stringify(relayReady)]);
+  const mutationsAfterFirstReady = storageMutations.length;
+  receiver.send(JSON.stringify(relayReady));
+  expect(storageMutations).toHaveLength(mutationsAfterFirstReady);
   expect(receiver.received).toEqual([]);
 
   sender.send(JSON.stringify(relayMessage));
   expect(receiver.received).toEqual([JSON.stringify(relayMessage)]);
 
   receiver.send(JSON.stringify(relayAck));
-  expect(sender.received).toEqual([JSON.stringify(relayReady), JSON.stringify(relayAck)]);
+  expect(sender.received).toEqual([
+    JSON.stringify(relayReady),
+    JSON.stringify(relayReady),
+    JSON.stringify(relayAck),
+  ]);
   expect(sender.closed).toBeNull();
   expect(receiver.closed).toBeNull();
 
@@ -208,15 +231,116 @@ test("SessionObject forwards opaque binary relay frames without durable storage"
   const senderServer = pairs[0]?.server;
   const receiverClient = pairs[1]?.client;
   if (!senderServer || !receiverClient) throw new Error("expected websocket pair");
+  receiverClient.send(JSON.stringify({ type: "relay-ready", payload: {} }));
 
-  const binary = new Uint8Array([0x52, 0x01, 0, 0, 0, 9, 1, 2, 3, 4]).buffer;
-  senderServer.dispatchEvent(new MessageEvent("message", { data: binary }));
+  const binary = new Uint8Array([0x52, 0x01, 0, 0, 0, 9, 1, 2, 3, 4]);
+  senderServer.dispatchEvent(new MessageEvent("message", { data: new Blob([binary]) }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   const received = receiverClient.received.at(-1);
-  expect(received instanceof ArrayBuffer).toBe(true);
-  expect(new Uint8Array(received as ArrayBuffer)).toEqual(new Uint8Array(binary));
+  expect(received instanceof ArrayBuffer || ArrayBuffer.isView(received)).toBe(true);
+  const receivedBytes = ArrayBuffer.isView(received)
+    ? new Uint8Array(received.buffer, received.byteOffset, received.byteLength)
+    : new Uint8Array(received as ArrayBuffer);
+  expect(receivedBytes).toEqual(binary);
   const durableWrites = JSON.stringify(storageMutations);
   expect(durableWrites).not.toContain("0x52");
+});
+
+test("SessionObject ignores a Blob frame after its sender socket is replaced", async () => {
+  const env = createEnv(createDurableObjects());
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+  const claim = await claimReceiver(env, session.sessionId);
+
+  await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+    env,
+  );
+  await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+    env,
+  );
+  const originalSenderServer = pairs[0]?.server;
+  const receiver = pairs[1]?.client;
+  if (!originalSenderServer || !receiver) throw new Error("expected initial socket pairs");
+  receiver.send(JSON.stringify({ type: "relay-ready", payload: {} }));
+
+  const bytes = new Uint8Array([0x52, 0x01, 0, 0, 0, 1, 1, 2, 3]);
+  const delayedBlob = new Blob([bytes]);
+  const gate = Promise.withResolvers<ArrayBuffer>();
+  Object.defineProperty(delayedBlob, "arrayBuffer", { value: () => gate.promise });
+  originalSenderServer.dispatchEvent(new MessageEvent("message", { data: delayedBlob }));
+
+  await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+    env,
+  );
+  gate.resolve(bytes.buffer as ArrayBuffer);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(receiver.received.some((message) => typeof message !== "string")).toBe(false);
+});
+
+test("SessionObject nacks JSON relay when the peer socket is unavailable", async () => {
+  resetEdgeSessionsForTests();
+  const env = createEnv(createDurableObjects());
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+
+  const senderUpgrade = await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+    env,
+  );
+  expect(senderUpgrade.status).toBe(101);
+  const sender = pairs[0]?.client;
+  if (!sender) throw new Error("expected sender socket");
+
+  sender.send(
+    JSON.stringify({
+      type: "relay-message",
+      payload: {
+        sequence: 3,
+        message: { type: "complete", totalBytes: 1 },
+      },
+    }),
+  );
+
+  expect(sender.received.map((message) => JSON.parse(String(message)))).toEqual([
+    {
+      type: "relay-nack",
+      payload: { sequence: 3, reason: "peer-unavailable" },
+    },
+  ]);
+});
+
+test("SessionObject nacks binary relay when the peer socket is unavailable", async () => {
+  resetEdgeSessionsForTests();
+  const env = createEnv(createDurableObjects());
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+
+  const senderUpgrade = await handleRequest(
+    websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+    env,
+  );
+  expect(senderUpgrade.status).toBe(101);
+  const sender = pairs[0]?.client;
+  if (!sender) throw new Error("expected sender socket");
+
+  // magic R, version 1, sequence 9
+  const binary = new Uint8Array([0x52, 0x01, 0, 0, 0, 9, 1, 2, 3]).buffer;
+  pairs[0]?.server.dispatchEvent(new MessageEvent("message", { data: binary }));
+
+  expect(sender.received.map((message) => JSON.parse(String(message)))).toEqual([
+    {
+      type: "relay-nack",
+      payload: { sequence: 9, reason: "peer-unavailable" },
+    },
+  ]);
 });
 
 test("SessionObject forwards receiver relay chunk-commit separately from relay delivery ack", async () => {
@@ -279,6 +403,66 @@ test("SessionObject forwards receiver relay chunk-commit separately from relay d
   expect(durableWrites).not.toContain("chunk-commit");
   expect(durableWrites).not.toContain("bytesBase64");
   expect(durableWrites).not.toContain("committedBytes");
+});
+
+test("SessionObject requires the replacement receiver to become relay-ready and ignores stale receiver ACKs", async () => {
+  const env = createEnv(createDurableObjects());
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+  const claim = await claimReceiver(env, session.sessionId);
+
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+
+  const sender = pairs[0]?.client;
+  const originalReceiver = pairs[1]?.client;
+  if (!sender || !originalReceiver) throw new Error("expected initial socket pairs");
+  originalReceiver.send(JSON.stringify({ type: "relay-ready", payload: {} }));
+  sender.received.length = 0;
+
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+  const replacementReceiver = pairs[2]?.client;
+  if (!replacementReceiver) throw new Error("expected replacement receiver socket");
+
+  const relayMessage = {
+    type: "relay-message",
+    payload: { sequence: 8, message: { type: "complete", totalBytes: 1 } },
+  };
+  sender.send(JSON.stringify(relayMessage));
+  expect(sender.received.map((message) => JSON.parse(String(message)))).toEqual([
+    { type: "relay-nack", payload: { sequence: 8, reason: "peer-unavailable" } },
+  ]);
+  expect(replacementReceiver.received).toEqual([]);
+
+  // The closed prior socket cannot resolve a sequence in the current receiver generation.
+  originalReceiver.send(JSON.stringify({ type: "relay-ack", payload: { sequence: 8 } }));
+  expect(sender.received).toHaveLength(1);
+
+  replacementReceiver.send(JSON.stringify({ type: "relay-ready", payload: {} }));
+  sender.send(JSON.stringify(relayMessage));
+  expect(replacementReceiver.received).toContainEqual(JSON.stringify(relayMessage));
 });
 
 test("release preserves sender WebSocket for later receiver signaling", async () => {

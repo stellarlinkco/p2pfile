@@ -230,20 +230,18 @@ test("pipelined direct transfer exceeds stop-and-wait ceiling at 200ms commit RT
   );
 });
 
-test("default window pipelines a single file under delayed commits", async () => {
+test("default direct window fills the 1 MiB commit budget under delayed commits", async () => {
   const result = await measureDirectThroughput({
-    fileBytes: MANIFEST_CHUNK_BYTES * 8,
+    fileBytes: MANIFEST_CHUNK_BYTES * 16,
     commitDelayMs: 100,
   });
 
-  expect(result.peakInFlight).toBeGreaterThan(1);
-  const kbps = formatKbps(result.bytesPerSecond);
-  // Default 16-chunk window should fully cover 8 chunks immediately.
-  expect(result.peakInFlight).toBe(8);
-  expect(kbps).toBeGreaterThan(400);
+  expect(result.chunkSends).toBe(16);
+  expect(result.peakInFlight).toBe(16);
+  expect(formatKbps(result.bytesPerSecond)).toBeGreaterThan(1_000);
 
   console.log(
-    `[throughput-ceiling] default window @100ms RTT: ${kbps.toFixed(1)} KB/s, peakInFlight=${result.peakInFlight}`,
+    `[throughput-ceiling] default direct @100ms RTT: ${formatKbps(result.bytesPerSecond).toFixed(1)} KB/s, peakInFlight=${result.peakInFlight}`,
   );
 });
 
@@ -264,6 +262,16 @@ test("pipelined relay transfer also raises peak in-flight above one", async () =
   );
 });
 
+test("default relay window remains bounded under delayed commits", async () => {
+  const result = await measureRelayThroughput({
+    fileBytes: MANIFEST_CHUNK_BYTES * 8,
+    commitDelayMs: 100,
+  });
+
+  expect(result.chunkSends).toBe(8);
+  expect(result.peakInFlight).toBe(8);
+  expect(formatKbps(result.bytesPerSecond)).toBeGreaterThan(400);
+});
 test("hand-rolled base64 encode of one chunk is a measurable main-thread tax", () => {
   const bytes = makeBytes(MANIFEST_CHUNK_BYTES, 3).buffer;
   const rounds = 20;

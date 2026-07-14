@@ -67,6 +67,11 @@ test("duplicate committed chunk re-acks without rewriting or double-counting pro
       },
     },
   );
+  await handleProtocolMessage(
+    { type: "file-start", file: manifestItem, offset: 0 },
+    state,
+    handlers,
+  );
 
   const context = state.fileStates.get("file-1");
   const sink = context?.sink;

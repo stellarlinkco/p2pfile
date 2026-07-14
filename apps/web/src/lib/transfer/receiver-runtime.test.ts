@@ -3,6 +3,7 @@ import { type FileManifestItem, MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
 import { createSha256Digest } from "./digest";
 import { buildReceiverState, handleProtocolMessage } from "./receiver-protocol";
 import { startReceiverRuntime } from "./receiver-runtime";
+import { encodeBinaryRelayChunkFrame } from "./relay-runtime";
 import type { BrowserSignalMessage, ReceiverRuntimeHandlers } from "./types";
 
 class FakePeerConnection {
@@ -28,6 +29,7 @@ class FakePeerConnection {
     }
   }
 
+  getStats = async () => new Map() as unknown as RTCStatsReport;
   close() {}
   async setRemoteDescription() {}
   async createAnswer(): Promise<RTCSessionDescriptionInit> {
@@ -43,14 +45,15 @@ class FakeWebSocket {
   static readonly OPEN = 1;
   static instances: FakeWebSocket[] = [];
   readyState = FakeWebSocket.OPEN;
+  binaryType: BinaryType = "blob";
   sent: BrowserSignalMessage[] = [];
-  private readonly listeners = new Map<string, Array<(event: MessageEvent<string>) => void>>();
+  private readonly listeners = new Map<string, Array<(event: MessageEvent) => void>>();
 
   constructor(readonly url: string) {
     FakeWebSocket.instances.push(this);
   }
 
-  addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+  addEventListener(type: string, listener: (event: MessageEvent) => void) {
     const listeners = this.listeners.get(type) ?? [];
     listeners.push(listener);
     this.listeners.set(type, listeners);
@@ -67,7 +70,18 @@ class FakeWebSocket {
     }
   }
 
-  close() {}
+  dispatchBlob(frame: ArrayBuffer) {
+    const event = { data: new Blob([frame]) } as MessageEvent;
+    for (const listener of this.listeners.get("message") ?? []) {
+      listener(event);
+    }
+  }
+
+  close() {
+    for (const listener of this.listeners.get("close") ?? []) {
+      listener({} as MessageEvent);
+    }
+  }
 }
 
 function receiverHandlers(): ReceiverRuntimeHandlers {
@@ -200,7 +214,7 @@ test("receiver forwards relay chunk-commit only after relay chunk is verified an
     const file: FileManifestItem = {
       id: "large-1",
       name: "large.zip",
-      size: MANIFEST_CHUNK_BYTES,
+      size: MANIFEST_CHUNK_BYTES * 2,
       mimeType: "application/zip",
     };
     const runtime = await startReceiverRuntime(
@@ -213,10 +227,12 @@ test("receiver forwards relay chunk-commit only after relay chunk is verified an
     bytes.fill(12);
     const digest = createSha256Digest();
     digest.update(bytes.buffer);
+    const chunkDigest = digest.digestHex();
 
     try {
       const socket = FakeWebSocket.instances[0];
       if (!socket) throw new Error("expected receiver socket");
+      const relayCommits = () => socket.sent.filter((message) => message.type === "relay-message");
       socket.dispatchMessage({ type: "mode", payload: { mode: "relay" } });
       socket.dispatchMessage({
         type: "relay-message",
@@ -237,21 +253,17 @@ test("receiver forwards relay chunk-commit only after relay chunk is verified an
           message: { type: "file-start", file, offset: 0 },
         },
       });
-      socket.dispatchMessage({
-        type: "relay-message",
-        payload: {
-          sequence: 2,
-          message: {
-            type: "chunk",
-            fileId: file.id,
-            chunkIndex: 0,
-            offset: 0,
-            bytesBase64: btoa(String.fromCharCode(...bytes)),
-            chunkDigest: digest.digestHex(),
-          },
-        },
-      });
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      socket.dispatchBlob(
+        encodeBinaryRelayChunkFrame(2, {
+          type: "chunk",
+          fileId: file.id,
+          chunkIndex: 0,
+          offset: 0,
+          bytes: bytes.buffer,
+          chunkDigest,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const relayAcks = socket.sent.filter((message) => message.type === "relay-ack");
       expect(relayAcks.map((message) => message.payload.sequence)).toEqual([0, 1, 2]);
@@ -267,6 +279,27 @@ test("receiver forwards relay chunk-commit only after relay chunk is verified an
           },
         },
       });
+      await Bun.sleep(300);
+      expect(relayCommits().length).toBeGreaterThan(1);
+      socket.dispatchMessage({ type: "relay-ack", payload: { sequence: 0 } });
+      const commitsAfterAck = relayCommits().length;
+      await Bun.sleep(300);
+      expect(relayCommits()).toHaveLength(commitsAfterAck);
+      socket.dispatchBlob(
+        encodeBinaryRelayChunkFrame(3, {
+          type: "chunk",
+          fileId: file.id,
+          chunkIndex: 1,
+          offset: MANIFEST_CHUNK_BYTES,
+          bytes: bytes.buffer,
+          chunkDigest,
+        }),
+      );
+      await Bun.sleep(50);
+      const commitsBeforeClose = relayCommits().length;
+      socket.close();
+      await Bun.sleep(300);
+      expect(relayCommits()).toHaveLength(commitsBeforeClose);
     } finally {
       runtime.stop();
     }
@@ -817,72 +850,48 @@ test("receiver-ready reports cached leading zero-byte file before active committ
   });
 });
 
-test("receiver-ready preserves active offset after completing prior zero-byte file", async () => {
+test("receiver accepts a nonzero relay generation manifest", async () => {
   await withReceiverHarness(async () => {
-    const emptyFile: FileManifestItem = {
-      id: "empty-prior",
-      name: "empty.txt",
-      size: 0,
+    const file: FileManifestItem = {
+      id: "file-1",
+      name: "alpha.txt",
+      size: 1,
       mimeType: "text/plain",
     };
-    const activeFile: FileManifestItem = {
-      id: "large-active",
-      name: "large.zip",
-      size: MANIFEST_CHUNK_BYTES * 4,
-      mimeType: "application/zip",
-    };
+    const statuses: string[] = [];
     const runtime = await startReceiverRuntime(
-      "session-active-after-zero",
+      "session-nonzero-relay-generation",
       "receiver-token",
-      [emptyFile, activeFile],
-      receiverHandlers(),
-      [],
-      new Map([[activeFile.id, MANIFEST_CHUNK_BYTES * 2]]),
+      [file],
+      {
+        ...receiverHandlers(),
+        onStatus(status) {
+          statuses.push(status);
+        },
+      },
     );
 
     try {
       const socket = FakeWebSocket.instances[0];
-      const emptyDigest = createSha256Digest().digestHex();
-      socket?.dispatchMessage({
-        type: "relay-message",
-        payload: { sequence: 0, message: { type: "file-start", file: emptyFile, offset: 0 } },
-      });
-      await new Promise((resolve) => setTimeout(resolve, 0));
       socket?.dispatchMessage({
         type: "relay-message",
         payload: {
-          sequence: 1,
-          message: { type: "file-end", fileId: emptyFile.id, bytes: 0, digest: emptyDigest },
-        },
-      });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      expect(socket?.sent.at(-1)).toEqual({
-        type: "receiver-ready",
-        payload: {
-          completedFiles: 1,
-          receiverInstanceId: "receiver-instance-test",
-          progress: {
-            manifestHash: `${emptyFile.id}:${emptyFile.name}:${emptyFile.size}|${activeFile.id}:${activeFile.name}:${activeFile.size}`,
-            files: [
-              {
-                fileId: emptyFile.id,
-                size: 0,
-                chunkSize: MANIFEST_CHUNK_BYTES,
-                committedBytes: 0,
-                completed: true,
-              },
-              {
-                fileId: activeFile.id,
-                size: activeFile.size,
-                chunkSize: MANIFEST_CHUNK_BYTES,
-                committedBytes: MANIFEST_CHUNK_BYTES * 2,
-                completed: false,
-              },
-            ],
+          sequence: 41,
+          message: {
+            type: "manifest",
+            files: [file],
+            totalBytes: file.size,
+            manifestHash: `${file.id}:${file.name}:${file.size}`,
           },
         },
       });
+      socket?.dispatchMessage({
+        type: "relay-message",
+        payload: { sequence: 42, message: { type: "file-start", file, offset: 0 } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(statuses).toContain("Receiving alpha.txt");
     } finally {
       runtime.stop();
     }

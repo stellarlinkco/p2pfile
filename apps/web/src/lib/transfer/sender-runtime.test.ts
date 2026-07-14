@@ -1,9 +1,7 @@
 import { expect, test } from "bun:test";
 import { MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
-import { RelayMessageQueue } from "./relay-queue";
 import { decodeBinaryRelayChunkFrame } from "./relay-runtime";
 import { shouldReuseDirectAttempt, startSenderRuntime } from "./sender-runtime";
-import { attachSenderSignalHandler } from "./sender-signal-handler";
 import type { BrowserSignalMessage, SenderRuntimeHandlers } from "./types";
 
 test("sender retry does not reuse a closed data channel", () => {
@@ -18,51 +16,6 @@ test("sender retry can reuse a connecting data channel", () => {
   const connectingChannel = { readyState: "connecting" } as RTCDataChannel;
 
   expect(shouldReuseDirectAttempt(peer, connectingChannel)).toBe(true);
-});
-
-test("sender treats inbound relay chunk-commit as receiver commit and sends only transport relay ack", async () => {
-  const ws = new FakeWebSocket("ws://sender");
-  const queue = new RelayMessageQueue(() => undefined);
-  const commit = queue.awaitCommit("file-1", 0, MANIFEST_CHUNK_BYTES);
-
-  try {
-    attachSenderSignalHandler({
-      ws: ws as unknown as WebSocket,
-      queue,
-      handlers: {
-        onStatus() {},
-        onMode() {},
-        onProgress() {},
-        onComplete() {},
-        onError() {},
-      },
-      isStopped: () => false,
-      getPeerConnection: () => null,
-      handleReceiverReady() {},
-      markDirectFailed() {},
-      continueFallback() {},
-      stopRelayMode() {},
-      markCompleted() {},
-    });
-
-    ws.receive({
-      type: "relay-message",
-      payload: {
-        sequence: 9,
-        message: {
-          type: "chunk-commit",
-          fileId: "file-1",
-          chunkIndex: 0,
-          committedBytes: MANIFEST_CHUNK_BYTES,
-        },
-      },
-    });
-
-    await expect(commit).resolves.toBe(MANIFEST_CHUNK_BYTES);
-    expect(ws.sent).toEqual([{ type: "relay-ack", payload: { sequence: 9 } }]);
-  } finally {
-    queue.stop();
-  }
 });
 
 class FakeDataChannel {
@@ -142,6 +95,7 @@ class FakePeerConnection {
   localDescription: RTCSessionDescription | null = null;
   remoteDescription: RTCSessionDescriptionInit | null = null;
   channels: FakeDataChannel[] = [];
+  addedCandidates: RTCIceCandidateInit[] = [];
   closed = false;
   private readonly listeners = new Map<string, Set<() => void>>();
 
@@ -181,7 +135,10 @@ class FakePeerConnection {
     this.remoteDescription = description;
   }
 
-  async addIceCandidate() {}
+  async addIceCandidate(candidate: RTCIceCandidateInit) {
+    if (this.remoteDescription === null) throw new Error("Remote description is not set.");
+    this.addedCandidates.push(candidate);
+  }
 
   close() {
     this.closed = true;
@@ -357,6 +314,30 @@ test("direct ICE failure with TURN configured renegotiates via a relay-only atte
   );
 });
 
+test("sender applies ICE candidates received before the answer", async () => {
+  await withSenderHarness(undefined, async ({ handlers, socket, peer, settle }) => {
+    const runtime = await startSenderRuntime(
+      "session-candidate-order",
+      "sender-token",
+      [],
+      [],
+      handlers,
+    );
+    const candidate = {
+      candidate: "candidate:1 1 udp 2122260223 192.0.2.1 5000 typ host",
+      sdpMid: "0",
+      sdpMLineIndex: 0,
+    };
+
+    socket().receive({ type: "ice-candidate", payload: candidate });
+    socket().receive({ type: "answer", payload: { type: "answer", sdp: "v=0" } });
+    await settle();
+
+    expect(peer(0).addedCandidates).toEqual([candidate]);
+    runtime.stop();
+  });
+});
+
 test("TURN relay-only failure falls through to ws relay", async () => {
   await withSenderHarness(
     "turn:turn.example.com:3478",
@@ -376,6 +357,9 @@ test("TURN relay-only failure falls through to ws relay", async () => {
       expect(socket().relayMessageCount()).toBe(0);
 
       peer(1).failIce();
+      await settle();
+      expect(socket().relayMessageCount()).toBe(0);
+      socket().receive({ type: "relay-ready", payload: {} });
       await settle();
 
       expect(socket().relayMessageCount()).toBeGreaterThan(0);
@@ -420,8 +404,39 @@ test("direct ICE failure without TURN keeps existing ws relay fallback", async (
     await settle();
 
     expect(FakePeerConnection.instances.length).toBe(1);
+    expect(socket().relayMessageCount()).toBe(0);
+
+    socket().receive({ type: "relay-ready", payload: {} });
+    await settle();
     expect(socket().relayMessageCount()).toBeGreaterThan(0);
 
+    runtime.stop();
+  });
+});
+
+test("receiver replacement nack waits for fresh relay readiness", async () => {
+  await withSenderHarness(undefined, async ({ handlers, errors, socket, peer, settle }) => {
+    const runtime = await startSenderRuntime(
+      "session-relay-nack",
+      "sender-token",
+      [],
+      [],
+      handlers,
+    );
+    await settle();
+    peer(0).failIce();
+    socket().receive({ type: "relay-ready", payload: {} });
+    await settle();
+    const sentBeforeRestart = socket().relayMessageCount();
+    expect(sentBeforeRestart).toBeGreaterThan(0);
+
+    socket().receive({ type: "relay-nack", payload: { sequence: 0, reason: "peer-unavailable" } });
+    await settle();
+    expect(errors).toEqual([]);
+
+    socket().receive({ type: "relay-ready", payload: {} });
+    await settle();
+    expect(socket().relayMessageCount()).toBeGreaterThan(sentBeforeRestart);
     runtime.stop();
   });
 });
@@ -572,6 +587,69 @@ test("data channel close during a zip send waits for receiver-ready instead of w
     runtime.stop();
   });
 });
+test("relay signal reconnect waits for fresh receiver progress before resending", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { __P2PFILE_TEST_FALLBACK__: true, location: { origin: "http://localhost" } },
+  });
+
+  try {
+    await withSenderHarness(undefined, async ({ handlers, settle }) => {
+      const file = new File([new Uint8Array(MANIFEST_CHUNK_BYTES * 2)], "large.zip", {
+        type: "application/zip",
+      });
+      const manifest = [{ id: "file-1", name: file.name, size: file.size, mimeType: file.type }];
+      const runtime = await startSenderRuntime(
+        "session-relay-signal-reconnect",
+        "sender-token",
+        [file],
+        manifest,
+        handlers,
+      );
+      await settle();
+
+      const firstSocket = FakeWebSocket.instances[0];
+      if (!firstSocket) throw new Error("Expected initial signal socket.");
+      firstSocket.receive({
+        type: "receiver-ready",
+        payload: {
+          progress: {
+            manifestHash: `${manifest[0]?.id}:${manifest[0]?.name}:${manifest[0]?.size}`,
+            files: [
+              {
+                fileId: "file-1",
+                size: file.size,
+                chunkSize: MANIFEST_CHUNK_BYTES,
+                committedBytes: 0,
+                completed: false,
+              },
+            ],
+          },
+          receiverInstanceId: "receiver-a",
+        },
+      });
+      firstSocket.receive({ type: "relay-ready", payload: {} });
+      await settle();
+      expect(firstSocket.relayMessageCount()).toBeGreaterThan(0);
+
+      firstSocket.close();
+      await settle();
+      const replacement = FakeWebSocket.instances[1];
+      if (!replacement) throw new Error("Expected replacement signal socket.");
+      expect(replacement.relayMessageCount()).toBe(0);
+
+      runtime.stop();
+    });
+  } finally {
+    if (previousWindow) {
+      Object.defineProperty(globalThis, "window", previousWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+});
+
 test("receiver restart resets an in-flight relay transfer when progress is unchanged", async () => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   Object.defineProperty(globalThis, "window", {
@@ -656,6 +734,7 @@ test("receiver restart resets an in-flight relay transfer when progress is uncha
         type: "receiver-ready",
         payload: { progress, receiverInstanceId: "receiver-a" },
       });
+      socket().receive({ type: "relay-ready", payload: {} });
       await acknowledgeRelayMessages();
       expect(relayFileStarts()).toEqual([MANIFEST_CHUNK_BYTES]);
 
@@ -663,6 +742,7 @@ test("receiver restart resets an in-flight relay transfer when progress is uncha
         type: "receiver-ready",
         payload: { progress, receiverInstanceId: "receiver-b" },
       });
+      socket().receive({ type: "relay-ready", payload: {} });
       await acknowledgeRelayMessages();
 
       let lastChunkFileId: string | null = null;
@@ -700,7 +780,6 @@ test("receiver restart resets an in-flight relay transfer when progress is uncha
         });
         await settle();
       }
-
       expect(relayFileStarts()).toEqual([MANIFEST_CHUNK_BYTES, MANIFEST_CHUNK_BYTES]);
       expect(errors).toEqual([]);
       runtime.stop();

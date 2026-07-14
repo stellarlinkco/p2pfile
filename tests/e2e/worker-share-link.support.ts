@@ -56,10 +56,7 @@ export async function installSenderSocketControl(page: Page) {
       value: () => {
         const target = sockets.at(-1);
         if (!target) return;
-        const replacement = new ControlledWebSocket(target.url);
-        replacement.addEventListener("open", () => {
-          target.close(1000, "controlled sender interruption");
-        });
+        target.close(1000, "controlled sender interruption");
       },
     });
   });

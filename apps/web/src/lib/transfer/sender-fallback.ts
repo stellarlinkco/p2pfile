@@ -51,6 +51,7 @@ export class SenderFallbackController {
   }
 
   startRelayMode(sendRelayMode: () => void): void {
+    this.stopRelayMode();
     sendRelayMode();
     this.relayModeTimer = setInterval(sendRelayMode, 250);
   }
@@ -83,6 +84,7 @@ export class SenderFallbackController {
 
     if (step === "fail") {
       this.handlers.onError("Relay transfer failed.");
+      return;
     }
   }
 }

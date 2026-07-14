@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const APP_NAME = "P2P File";
+export const SENDER_RECONNECT_GRACE_MS = 30 * 1000;
 
 export const SessionIdSchema = z.string().min(6);
 export const SessionAccessCodeSchema = z
@@ -345,6 +346,13 @@ export const SignalEnvelopeSchema = z.discriminatedUnion("type", [
     type: z.literal("relay-ack"),
     payload: z.object({
       sequence: z.number().int().nonnegative(),
+    }),
+  }),
+  z.object({
+    type: z.literal("relay-nack"),
+    payload: z.object({
+      sequence: z.number().int().nonnegative(),
+      reason: z.string().min(1).optional(),
     }),
   }),
   z.object({

@@ -12,7 +12,6 @@ import { currentTime } from "./clock";
 const ACCESS_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 export const COMPLETED_SESSION_VIEW_TTL_MS = 2 * 60 * 1000;
-export const SENDER_RECONNECT_GRACE_MS = 30 * 1000;
 export const OPEN_SESSION_TTL_MS = 10 * 60 * 1000;
 export const SESSION_STORAGE_KEY = "session";
 export const DIRECTORY_OBJECT_NAME = "session-directory";
@@ -29,6 +28,8 @@ export type SessionRecord = {
   createdAt: number;
   openExpiresAt: number;
   retriesRemaining: number;
+  receiverGeneration: number;
+  relayReadyGeneration: number | null;
   failureReason?: string;
 };
 
@@ -145,7 +146,13 @@ export function isSenderLiveSession(session: SessionRecord) {
 }
 
 export async function readSession(storage: DurableObjectStorage) {
-  return storage.get<SessionRecord>(SESSION_STORAGE_KEY);
+  const session = await storage.get<SessionRecord>(SESSION_STORAGE_KEY);
+  if (!session) return undefined;
+  return {
+    ...session,
+    receiverGeneration: session.receiverGeneration ?? 0,
+    relayReadyGeneration: session.relayReadyGeneration ?? null,
+  };
 }
 
 export async function writeSession(storage: DurableObjectStorage, session: SessionRecord) {
@@ -168,5 +175,7 @@ export function createInitialSession(manifest: FileManifestItem[]): SessionRecor
     createdAt,
     openExpiresAt: createdAt + OPEN_SESSION_TTL_MS,
     retriesRemaining: DEFAULT_RETRY_BUDGET,
+    receiverGeneration: 0,
+    relayReadyGeneration: null,
   };
 }

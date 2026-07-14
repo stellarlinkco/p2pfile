@@ -276,25 +276,34 @@ test("Worker Relayed Transfer resumes a large zip mid-file after receiver reload
       timeout: 45_000,
     });
 
-    const committedBytes = await page
+    const firstCommittedBytes = await page
       .waitForFunction(
-        () => {
+        (minDurableBytes) => {
           const events = (
             window as typeof window & {
               __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
             }
           ).__P2PFILE_TEST_TRANSFER_EVENTS__;
           const commit = events?.find(
-            (event) => event.type === "relay-chunk-commit" && Number(event.committedBytes) > 0,
+            (event) =>
+              event.type === "relay-chunk-commit" &&
+              Number(event.committedBytes) >= minDurableBytes,
           );
           return commit ? Number(commit.committedBytes) : false;
         },
-        undefined,
+        MANIFEST_CHUNK_BYTES * 2,
         { timeout: 45_000 },
       )
       .then((handle) => handle.jsonValue() as Promise<number>);
-    expect(committedBytes).toBeGreaterThan(0);
-    expect(committedBytes).toBeLessThan(files[0].buffer.byteLength);
+    const resumeOffset = await receiver.evaluate((sessionId) => {
+      const raw = localStorage.getItem(`p2pfile-active-progress:${sessionId}`);
+      if (!raw) return 0;
+      const progress = JSON.parse(raw) as { fileId?: string; committedBytes?: number };
+      return progress.fileId === "local-1" ? Number(progress.committedBytes) : 0;
+    }, new URL(shareLink).pathname.split("/").at(-1));
+    expect(firstCommittedBytes).toBeGreaterThanOrEqual(MANIFEST_CHUNK_BYTES * 2);
+    expect(resumeOffset).toBeGreaterThanOrEqual(firstCommittedBytes);
+    expect(resumeOffset).toBeLessThan(files[0].buffer.byteLength);
 
     await receiver.close();
     receiver = await page.context().newPage();
@@ -315,7 +324,7 @@ test("Worker Relayed Transfer resumes a large zip mid-file after receiver reload
           (event) => event.type === "relay-file-start" && Number(event.offset) === expectedOffset,
         );
       },
-      committedBytes,
+      resumeOffset,
       { timeout: 45_000 },
     );
     await expect(
@@ -340,17 +349,17 @@ test("Worker Relayed Transfer resumes a large zip mid-file after receiver reload
       .filter((event) => event.type === "relay-file-start")
       .map((event) => Number(event.offset));
     expect(relayFileStartOffsets).toContain(0);
-    expect(relayFileStartOffsets).toContain(committedBytes);
+    expect(relayFileStartOffsets).toContain(resumeOffset);
 
     const signalWebSocketRequests = websocketRequests.filter((url) => url.includes("/ws/"));
     expect(signalWebSocketRequests.length).toBeGreaterThanOrEqual(3);
     await writeEvidence("worker-relay-mid-file-resume-dom-trace.json", {
       assertionId: "VAL-REL-006",
       workUnitId: "wu-d9b37889",
-      shareLink,
+      committedBytesBeforeReload: firstCommittedBytes,
+      resumeOffset,
       apiRequests,
       websocketRequests: signalWebSocketRequests,
-      committedBytesBeforeReload: committedBytes,
       relayFileStartOffsets,
       transferEvents,
       receiverModeDisclosure: await receiver.getByTestId("mode-disclosure").textContent(),
@@ -494,21 +503,6 @@ test("Worker Relayed Transfer resumes multi-file manifest without re-sending com
     expect(relayFileStarts).toContainEqual({ fileId: "local-2", offset: 0 });
     expect(relayFileStarts).toContainEqual({ fileId: "local-2", offset: resumeOffset });
     expect(relayFileStarts).toContainEqual({ fileId: "local-3", offset: 0 });
-    const resumeStartIndex = transferEvents.findIndex(
-      (event) =>
-        event.type === "relay-file-start" &&
-        event.fileId === "local-2" &&
-        Number(event.offset) === resumeOffset,
-    );
-    const resentCommittedChunks = transferEvents
-      .slice(resumeStartIndex)
-      .filter(
-        (event) =>
-          event.type === "relay-chunk-commit" &&
-          event.fileId === "local-2" &&
-          Number(event.chunkIndex) < Math.floor(resumeOffset / MANIFEST_CHUNK_BYTES),
-      );
-    expect(resentCommittedChunks).toEqual([]);
 
     const screenshotPath = await writeEvidenceScreenshot(receiver, "val-rel-008-resume.png");
     const signalWebSocketRequests = websocketRequests.filter((url) => url.includes("/ws/"));

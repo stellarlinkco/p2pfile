@@ -10,6 +10,7 @@ import {
   type ReleaseSessionRequest,
   ReleaseSessionRequestSchema,
   ReleaseSessionResponseSchema,
+  SENDER_RECONNECT_GRACE_MS,
   SessionMutationResponseSchema,
   type SessionRole,
 } from "@p2pfile/shared";
@@ -25,17 +26,22 @@ import {
   matchesCompletedManifest,
   OPEN_SESSION_TTL_MS,
   readSession,
-  SENDER_RECONNECT_GRACE_MS,
   SESSION_STORAGE_KEY,
   type SessionCreatePayload,
   type SessionRecord,
   toPublicSession,
   writeSession,
 } from "./session-record";
-import { closeSockets, isRoleAllowedSignal, parseEdgeWire } from "./session-signaling";
+import {
+  closeSockets,
+  isRoleAllowedSignal,
+  parseEdgeWire,
+  relaySequenceFromBinaryWire,
+} from "./session-signaling";
 
 export class SessionDurableObject implements DurableObject {
   private readonly sockets: Partial<Record<SessionRole, WebSocket>> = {};
+  private currentSession: SessionRecord | null = null;
   constructor(private readonly state: DurableObjectState) {}
 
   async fetch(request: Request): Promise<Response> {
@@ -54,8 +60,9 @@ export class SessionDurableObject implements DurableObject {
       return json({ ok: true });
     }
 
-    const session = await readSession(this.state.storage);
+    const session = this.currentSession ?? (await readSession(this.state.storage));
     if (!session) return notFound("session not found");
+    this.currentSession = session;
     if (isExpired(session)) {
       await this.deleteSession();
       return notFound("session not found");
@@ -110,6 +117,7 @@ export class SessionDurableObject implements DurableObject {
   }
 
   private async persistSession(session: SessionRecord) {
+    this.currentSession = session;
     await writeSession(this.state.storage, session);
     await this.scheduleExpiry(session);
   }
@@ -131,6 +139,7 @@ export class SessionDurableObject implements DurableObject {
   }
 
   private async deleteSession() {
+    this.currentSession = null;
     await this.state.storage.delete(SESSION_STORAGE_KEY);
     await this.state.storage.deleteAlarm();
     closeSockets(this.sockets);
@@ -248,31 +257,30 @@ export class SessionDurableObject implements DurableObject {
   private async end(session: SessionRecord, input: EndSessionRequest) {
     if (input.senderToken !== session.senderToken)
       return json({ message: "invalid token" }, { status: 401 });
-    await this.markSenderEnded(session, "sender-ended");
-    return json(
-      SessionMutationResponseSchema.parse({ ok: true, session: toPublicSession(session) }),
-    );
+    const ended = await this.markSenderEnded(session, "sender-ended");
+    return json(SessionMutationResponseSchema.parse({ ok: true, session: toPublicSession(ended) }));
   }
 
   private async markSenderEnded(session: SessionRecord, reason: string) {
-    const latest = (await readSession(this.state.storage)) ?? session;
-    if (!isSenderLiveSession(latest)) return;
+    const latest = this.currentSession ?? session;
+    if (!isSenderLiveSession(latest)) return latest;
     latest.state = "ended";
     latest.openExpiresAt = currentTime.now() + COMPLETED_SESSION_VIEW_TTL_MS;
     await this.persistSession(latest);
     this.sockets.receiver?.send(JSON.stringify({ type: "sender-left", payload: { reason } }));
     closeSockets(this.sockets);
+    return latest;
   }
 
   private async markSenderReconnecting(session: SessionRecord) {
-    const latest = (await readSession(this.state.storage)) ?? session;
+    const latest = this.currentSession ?? session;
     if (this.sockets.sender) return;
     if (!isSenderLiveSession(latest) || latest.state === "reconnecting") return;
     latest.state = "reconnecting";
+    latest.openExpiresAt = currentTime.now() + SENDER_RECONNECT_GRACE_MS;
     this.sockets.receiver?.send(
       JSON.stringify({ type: "sender-reconnecting", payload: { reason: "sender-disconnected" } }),
     );
-    latest.openExpiresAt = currentTime.now() + SENDER_RECONNECT_GRACE_MS;
     await this.persistSession(latest);
   }
 
@@ -295,6 +303,11 @@ export class SessionDurableObject implements DurableObject {
     }
 
     const replaced = this.sockets[role];
+    if (role === "receiver") {
+      session.receiverGeneration += 1;
+      session.relayReadyGeneration = null;
+      void this.persistSession(session);
+    }
     this.sockets[role] = server;
     if (
       role === "sender" &&
@@ -320,19 +333,45 @@ export class SessionDurableObject implements DurableObject {
   }
 
   private async handleSignal(
-    session: SessionRecord,
+    initialSession: SessionRecord,
     role: SessionRole,
     socket: WebSocket,
     event: MessageEvent,
   ) {
-    const wire = parseEdgeWire(event.data);
+    if (this.sockets[role] !== socket) {
+      return;
+    }
+    const data = event.data instanceof Blob ? await event.data.arrayBuffer() : event.data;
+    if (this.sockets[role] !== socket) {
+      return;
+    }
+    const session = this.currentSession ?? initialSession;
+    const wire = parseEdgeWire(data);
     if (!wire) {
       socket.close(1003, "invalid signal message");
       return;
     }
 
+    const rejectRelay = (sequence: number) => {
+      socket.send(
+        JSON.stringify({
+          type: "relay-nack",
+          payload: { sequence, reason: "peer-unavailable" },
+        }),
+      );
+    };
     if (wire.kind === "binary") {
       // Opaque binary relay frames (chunk payloads) are forwarded in-flight only.
+      if (role === "sender") {
+        const sequence = relaySequenceFromBinaryWire(wire.bytes);
+        if (
+          sequence !== null &&
+          (!this.sockets.receiver || session.relayReadyGeneration !== session.receiverGeneration)
+        ) {
+          rejectRelay(sequence);
+          return;
+        }
+      }
       const peer = this.sockets[role === "sender" ? "receiver" : "sender"];
       if (peer?.readyState === WebSocket.OPEN) peer.send(wire.bytes);
       return;
@@ -351,6 +390,20 @@ export class SessionDurableObject implements DurableObject {
     if (envelope.type === "sender-left") {
       await this.markSenderEnded(session, envelope.payload.reason ?? "sender-left");
       return;
+    }
+    if (role === "sender" && envelope.type === "relay-message") {
+      if (!this.sockets.receiver || session.relayReadyGeneration !== session.receiverGeneration) {
+        rejectRelay(envelope.payload.sequence);
+        return;
+      }
+    }
+    if (
+      role === "receiver" &&
+      envelope.type === "relay-ready" &&
+      session.relayReadyGeneration !== session.receiverGeneration
+    ) {
+      session.relayReadyGeneration = session.receiverGeneration;
+      void this.persistSession(session);
     }
     const peer = this.sockets[role === "sender" ? "receiver" : "sender"];
     if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify(envelope));

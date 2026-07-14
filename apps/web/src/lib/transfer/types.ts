@@ -95,6 +95,7 @@ export type BrowserSignalMessage =
   | { type: "relay-ready"; payload: Record<string, never> }
   | { type: "relay-message"; payload: { sequence: number; message: RelayProtocolMessage } }
   | { type: "relay-ack"; payload: { sequence: number } }
+  | { type: "relay-nack"; payload: { sequence: number; reason?: string } }
   | { type: "transfer-complete"; payload: { completedAt?: number } }
   | { type: "sender-reconnecting"; payload: { reason?: string } }
   | { type: "sender-left"; payload: Record<string, never> };

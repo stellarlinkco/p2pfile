@@ -25,3 +25,22 @@ test("sender fallback reports the existing connection guidance after direct and 
 
   expect(errors).toEqual(["Relay transfer failed."]);
 });
+
+test("starting relay announcements twice keeps one stoppable timer", async () => {
+  const controller = new SenderFallbackController(
+    false,
+    handlersWith(() => undefined),
+  );
+  let announcements = 0;
+  const announce = () => {
+    announcements += 1;
+  };
+
+  controller.startRelayMode(announce);
+  controller.startRelayMode(announce);
+  controller.stopRelayMode();
+  const stoppedAt = announcements;
+  await Bun.sleep(300);
+
+  expect(announcements).toBe(stoppedAt);
+});

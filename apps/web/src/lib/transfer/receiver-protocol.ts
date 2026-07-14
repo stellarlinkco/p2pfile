@@ -240,8 +240,14 @@ export async function handleProtocolMessage(
     if (context.state === "completed") {
       return;
     }
+    if (message.offset < context.bytes) {
+      return;
+    }
     if (message.offset !== context.bytes) {
-      failReceiverState(state, "Sender resumed from the wrong offset.");
+      failReceiverState(
+        state,
+        `Sender resumed from the wrong offset (expected ${context.bytes}, received ${message.offset}).`,
+      );
     }
     const existingSink = context.sink;
     const digest = createSha256Digest();
