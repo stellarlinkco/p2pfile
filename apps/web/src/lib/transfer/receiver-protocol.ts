@@ -4,7 +4,8 @@ import {
   manifestHash,
   resumeProgressFromManifest,
 } from "@p2pfile/shared";
-import { createSha256Digest, type Sha256Digest } from "./digest";
+import { createSha256Digest } from "./digest";
+import { isInvalidOpfsCheckpointError } from "./receiver-opfs-client";
 import { createReceiverSink, type ReceiverSink } from "./receiver-sinks";
 import type {
   ReceivedFile,
@@ -18,7 +19,6 @@ type ReceiverFileContext = {
   bytes: number;
   chunkIndex: number;
   completedFile: ReceivedFile | null;
-  digest: Sha256Digest | null;
   file: FileManifestItem;
   sink: ReceiverSink | null;
   state: TransferFileState;
@@ -31,7 +31,6 @@ export type ReceiverProtocolState = {
   completedBytes: number;
   receivedFiles: number;
   currentFile: FileManifestItem | null;
-  currentDigest: Sha256Digest | null;
   currentBytes: number;
   currentChunkIndex: number;
   sink: ReceiverSink | null;
@@ -41,14 +40,11 @@ export type ReceiverProtocolState = {
   failed: boolean;
 };
 
-function completedFromCommitted(file: FileManifestItem, committedBytes: number, hasEntry: boolean) {
-  return committedBytes === file.size && (file.size > 0 || hasEntry);
-}
-
 export function buildReceiverState(
   expectedManifest: FileManifestItem[],
   committedBytesByFileId: ReadonlyMap<string, number> = new Map(),
   sessionId = "default",
+  completedFileIds: ReadonlySet<string> = new Set(),
 ): ReceiverProtocolState {
   const committed = new Map<string, number>();
   const fileStates = new Map<string, ReceiverFileContext>();
@@ -62,8 +58,7 @@ export function buildReceiverState(
   for (const file of expectedManifest) {
     const rawCommittedBytes = committedBytesByFileId.get(file.id) ?? 0;
     const boundedCommittedBytes = Math.max(0, Math.min(rawCommittedBytes, file.size));
-    const hasCommittedEntry = committedBytesByFileId.has(file.id);
-    const completed = completedFromCommitted(file, boundedCommittedBytes, hasCommittedEntry);
+    const completed = completedFileIds.has(file.id) && boundedCommittedBytes === file.size;
     committed.set(file.id, boundedCommittedBytes);
     if (completed) {
       completedBytes += file.size;
@@ -79,7 +74,6 @@ export function buildReceiverState(
       bytes: boundedCommittedBytes,
       chunkIndex: Math.floor(boundedCommittedBytes / MANIFEST_CHUNK_BYTES),
       completedFile: null,
-      digest: null,
       file,
       sink: null,
       state: completed ? "completed" : boundedCommittedBytes > 0 ? "reconnecting" : "queued",
@@ -93,7 +87,6 @@ export function buildReceiverState(
     completedBytes,
     receivedFiles,
     currentFile: null,
-    currentDigest: null,
     currentBytes,
     currentChunkIndex,
     sink: null,
@@ -112,13 +105,25 @@ function manifestMatchesExpected(expected: FileManifestItem[], received: FileMan
   });
 }
 
-function createSink(file: FileManifestItem, sessionId: string): ReceiverSink {
-  return createReceiverSink(file, sessionId);
+function createSink(
+  file: FileManifestItem,
+  state: ReceiverProtocolState,
+  handlers: ReceiverRuntimeHandlers,
+  onFailure?: (error: Error) => void,
+): ReceiverSink {
+  return createReceiverSink(
+    file,
+    state.sessionId,
+    (durableBytes) => {
+      state.committedBytesByFileId.set(file.id, durableBytes);
+      handlers.onDurableProgress?.(file.id, durableBytes);
+    },
+    onFailure,
+  );
 }
 
 function syncLegacyCurrent(state: ReceiverProtocolState, context: ReceiverFileContext | null) {
   state.currentFile = context?.file ?? null;
-  state.currentDigest = context?.digest ?? null;
   state.currentBytes = context?.bytes ?? 0;
   state.currentChunkIndex = context?.chunkIndex ?? 0;
   state.sink = context?.sink ?? null;
@@ -141,17 +146,23 @@ function failReceiverState(state: ReceiverProtocolState, message: string): never
   for (const context of state.fileStates.values()) {
     if (context.state !== "completed") {
       context.state = "failed";
-      context.digest = null;
       context.sink?.reset();
       context.sink = null;
     }
   }
   state.currentFile = null;
-  state.currentDigest = null;
   state.currentBytes = 0;
   state.currentChunkIndex = 0;
   state.sink = null;
   throw new Error(message);
+}
+
+export function disposeReceiverState(state: ReceiverProtocolState) {
+  for (const context of state.fileStates.values()) {
+    context.sink?.reset();
+    context.sink = null;
+  }
+  state.sink = null;
 }
 
 function digestHex(bytes: ArrayBuffer) {
@@ -162,6 +173,7 @@ function digestHex(bytes: ArrayBuffer) {
 
 type ProtocolOptions = {
   onChunkCommit?: (ack: Extract<TransferProtocolMessage, { type: "chunk-commit" }>) => void;
+  onAsyncError?: (error: Error) => void;
 };
 
 function progressFiles(state: ReceiverProtocolState) {
@@ -198,7 +210,22 @@ function emitProgress(
 }
 
 function resumeProgressFromState(state: ReceiverProtocolState) {
-  return resumeProgressFromManifest(state.manifest, state.committedBytesByFileId);
+  for (const context of state.fileStates.values()) {
+    if (context.sink) {
+      state.committedBytesByFileId.set(
+        context.file.id,
+        Math.min(context.bytes, context.sink.durableBytes),
+      );
+    }
+  }
+  const progress = resumeProgressFromManifest(state.manifest, state.committedBytesByFileId);
+  return {
+    ...progress,
+    files: progress.files.map((file) => ({
+      ...file,
+      completed: state.fileStates.get(file.fileId)?.state === "completed",
+    })),
+  };
 }
 
 export async function handleProtocolMessage(
@@ -250,20 +277,26 @@ export async function handleProtocolMessage(
       );
     }
     const existingSink = context.sink;
-    const digest = createSha256Digest();
-    context.digest = digest;
     context.chunkIndex = Math.floor(message.offset / MANIFEST_CHUNK_BYTES);
-    context.sink = existingSink ?? createSink(message.file, state.sessionId);
+    context.sink = existingSink ?? createSink(message.file, state, handlers, options.onAsyncError);
     context.state = "receiving";
-    if (message.offset > 0) {
-      const committedBytes = await context.sink.updateDigest(
-        0,
-        message.offset,
-        message.file,
-        digest,
-      );
-      if (committedBytes !== message.offset) {
-        failReceiverState(state, "Receiver committed data is unavailable.");
+    if (!existingSink) {
+      let checkpointInvalid = false;
+      try {
+        const committedBytes = await context.sink.restore(message.offset);
+        if (committedBytes !== message.offset) {
+          checkpointInvalid = true;
+          throw new Error("Receiver committed data is unavailable.");
+        }
+      } catch (error) {
+        if (checkpointInvalid || isInvalidOpfsCheckpointError(error)) {
+          state.committedBytesByFileId.set(message.file.id, 0);
+          handlers.onFileIntegrityFailure?.(message.file.id);
+        }
+        failReceiverState(
+          state,
+          error instanceof Error ? error.message : "Receiver committed data is unavailable.",
+        );
       }
     }
     syncLegacyCurrent(state, context);
@@ -291,11 +324,15 @@ export async function handleProtocolMessage(
       failReceiverState(state, "Sender sent a chunk for the wrong file.");
     }
     if (chunkOffset < context.bytes) {
+      const duplicateCommittedBytes = chunkOffset + message.bytes.byteLength;
+      if (duplicateCommittedBytes > context.bytes) {
+        failReceiverState(state, "Sender sent a chunk at the wrong offset.");
+      }
       options.onChunkCommit?.({
         type: "chunk-commit",
         fileId: message.fileId,
         chunkIndex,
-        committedBytes: context.bytes,
+        committedBytes: duplicateCommittedBytes,
       });
       return;
     }
@@ -305,9 +342,9 @@ export async function handleProtocolMessage(
     if (!message.chunkDigest || digestHex(message.bytes) !== message.chunkDigest) {
       failReceiverState(state, "Chunk integrity verification failed.");
     }
-    await context.sink?.write(chunkOffset, message.bytes, context.file);
-    context.digest?.update(message.bytes);
-    context.bytes += message.bytes.byteLength;
+    const chunkLength = message.bytes.byteLength;
+    await context.sink?.write(chunkIndex, chunkOffset, message.bytes);
+    context.bytes += chunkLength;
     context.chunkIndex += 1;
     context.state = "receiving";
     // Resume / receiver-ready must not advance past OPFS durable checkpoints.
@@ -337,14 +374,17 @@ export async function handleProtocolMessage(
     ) {
       failReceiverState(state, "File size verification failed.");
     }
-    if (context.digest?.digestHex() !== message.digest) {
+    const finalized = await context.sink?.finalize();
+    if (!finalized) failReceiverState(state, "Receiver sink finalization failed.");
+    if (finalized.digest !== message.digest) {
+      URL.revokeObjectURL(finalized.file.url);
+      state.committedBytesByFileId.set(message.fileId, 0);
+      handlers.onFileIntegrityFailure?.(message.fileId);
       failReceiverState(state, "File integrity verification failed.");
     }
-    const file = await context.sink?.finalize(context.file);
-    if (!file) failReceiverState(state, "Receiver sink finalization failed.");
+    const file = finalized.file;
     context.completedFile = file;
     context.state = "completed";
-    context.digest = null;
     context.sink = null;
     state.committedBytesByFileId.set(context.file.id, context.file.size);
     recomputeCompletionTotals(state);

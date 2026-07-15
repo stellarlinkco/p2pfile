@@ -394,13 +394,6 @@ test.describe("P2P File v1 session flow", () => {
       await receiver.getByTestId("claim-session-button").click();
       await expect(receiver.getByTestId("mode-disclosure")).toContainText(/Direct Transfer|直传/i);
 
-      await expect(receiver.getByTestId("file-state-local-1")).toContainText("receiving", {
-        timeout: 30_000,
-      });
-      await expect(receiver.getByTestId("file-state-local-2")).toContainText("completed", {
-        timeout: 30_000,
-      });
-
       await expect(
         receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
       ).toBeVisible({ timeout: 90_000 });

@@ -18,6 +18,12 @@ const noopHandlers: SenderRuntimeHandlers = {
   onError() {},
 };
 
+function fixedFlow(chunks: number) {
+  return {
+    currentMaxInFlightBytes: () => chunks * MANIFEST_CHUNK_BYTES,
+  };
+}
+
 function makeBytes(size: number, seed: number) {
   const bytes = new Uint8Array(size);
   for (let index = 0; index < size; index += 1) {
@@ -309,7 +315,7 @@ test("direct scheduler bounds active files and in-flight bytes while small files
   const harness = new DirectHarness();
   const transfer = sendFiles(harness.channel, files, plan, noopHandlers, 0, () => true, undefined, {
     maxActiveFiles: 2,
-    maxInFlightBytes: MANIFEST_CHUNK_BYTES * 2,
+    flowControl: fixedFlow(2),
   });
 
   await finishControlledDirectTransfer(harness, transfer);
@@ -334,7 +340,7 @@ test("relay scheduler follows the same active-file and in-flight byte bounds", a
     undefined,
     {
       maxActiveFiles: 2,
-      maxInFlightBytes: MANIFEST_CHUNK_BYTES * 2,
+      flowControl: fixedFlow(2),
     },
   );
 
@@ -368,7 +374,7 @@ test("single file pipelines multiple chunks within the in-flight byte window", a
 
   const transfer = sendFiles(harness.channel, files, plan, handlers, 0, () => true, undefined, {
     maxActiveFiles: 1,
-    maxInFlightBytes: MANIFEST_CHUNK_BYTES * 4,
+    flowControl: fixedFlow(4),
   });
 
   await harness.waitForChunk("file-1", 0);
@@ -412,7 +418,7 @@ test("durable progress advances only after ordered commits", async () => {
 
   const transfer = sendFiles(harness.channel, files, plan, handlers, 0, () => true, undefined, {
     maxActiveFiles: 1,
-    maxInFlightBytes: MANIFEST_CHUNK_BYTES * 3,
+    flowControl: fixedFlow(3),
   });
 
   await harness.waitForChunk("file-1", 0);
@@ -441,7 +447,7 @@ test("global in-flight byte window still caps pipelined sends", async () => {
 
   const transfer = sendFiles(harness.channel, files, plan, noopHandlers, 0, () => true, undefined, {
     maxActiveFiles: 1,
-    maxInFlightBytes: MANIFEST_CHUNK_BYTES * 2,
+    flowControl: fixedFlow(2),
   });
 
   await harness.waitForChunk("file-1", 0);
@@ -466,6 +472,43 @@ test("global in-flight byte window still caps pipelined sends", async () => {
   for (const chunkIndex of [1, 2, 3, 4, 5]) {
     await harness.waitForChunk("file-1", chunkIndex);
     harness.commit("file-1", chunkIndex);
+  }
+  await transfer;
+});
+
+test("scheduler applies a changed flow window at the next scheduling boundary", async () => {
+  const files = [
+    new File([makeBytes(MANIFEST_CHUNK_BYTES * 6, 23)], "dynamic-window.zip", {
+      type: "application/zip",
+    }),
+  ];
+  const plan = buildTransferPlan(files);
+  const harness = new DirectHarness();
+  let chunks = 2;
+  const transfer = sendFiles(harness.channel, files, plan, noopHandlers, 0, () => true, undefined, {
+    maxActiveFiles: 1,
+    flowControl: {
+      currentMaxInFlightBytes: () => chunks * MANIFEST_CHUNK_BYTES,
+    },
+  });
+
+  await harness.waitForChunk("file-1", 1);
+  chunks = 3;
+  harness.commit("file-1", 0);
+  await harness.waitForChunk("file-1", 3);
+  await flushMicrotasks();
+  expect(
+    harness.messages
+      .filter((message) => message.type === "chunk")
+      .map((message) => (message.type === "chunk" ? message.chunkIndex : -1)),
+  ).toEqual([0, 1, 2, 3]);
+  expect(
+    harness.messages.some((message) => message.type === "chunk" && message.chunkIndex === 4),
+  ).toBe(false);
+
+  for (const chunkIndex of [1, 2, 3, 4, 5]) {
+    harness.commit("file-1", chunkIndex);
+    if (chunkIndex < 5) await harness.waitForChunk("file-1", chunkIndex + 1);
   }
   await transfer;
 });
@@ -512,7 +555,7 @@ test("pipelined commits may resolve out of order without failing the transfer", 
 
   const transfer = sendFiles(harness.channel, files, plan, handlers, 0, () => true, undefined, {
     maxActiveFiles: 1,
-    maxInFlightBytes: MANIFEST_CHUNK_BYTES * 3,
+    flowControl: fixedFlow(3),
   });
 
   await harness.waitForChunk("file-1", 0);

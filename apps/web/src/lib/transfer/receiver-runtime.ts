@@ -10,6 +10,7 @@ import {
   applyMode,
   awaitSocketOpen,
   buildReceiverState,
+  disposeReceiverState,
   forceDirectFail,
   handleProtocolMessage,
   makePeerConnection,
@@ -17,6 +18,7 @@ import {
   parseSignalBlob,
   parseSignalWire,
   preferRelayInTests,
+  receiverResumeProgress,
   relayAvailable,
   sendSignal,
 } from "./runtime-shared";
@@ -36,7 +38,15 @@ function restoreProgressState(
   committedBytesByFileId: ReadonlyMap<string, number>,
 ) {
   const committed = seedCommittedBytes(receivedFiles, committedBytesByFileId);
-  const progress = resumeProgressFromManifest(expectedManifest, committed);
+  const completedFileIds = new Set(receivedFiles.map((file) => file.id));
+  const baseProgress = resumeProgressFromManifest(expectedManifest, committed);
+  const progress = {
+    ...baseProgress,
+    files: baseProgress.files.map((file) => ({
+      ...file,
+      completed: completedFileIds.has(file.fileId),
+    })),
+  };
   const activeIndex = progress.files.findIndex(
     (file) => !file.completed && file.committedBytes > 0,
   );
@@ -96,7 +106,12 @@ export async function startReceiverRuntime(
   const pendingIceCandidates: RTCIceCandidateInit[] = [];
   const pendingRelayMessages = new Map<number, TransferProtocolMessage>();
   const seededCommittedBytes = seedCommittedBytes(receivedFiles, committedBytesByFileId);
-  const state = buildReceiverState(expectedManifest, seededCommittedBytes, sessionId);
+  const state = buildReceiverState(
+    expectedManifest,
+    seededCommittedBytes,
+    sessionId,
+    new Set(receivedFiles.map((file) => file.id)),
+  );
   let nextRelaySequence = 0;
   let relaySequenceInitialized = false;
   let relayRequested = false;
@@ -118,15 +133,7 @@ export async function startReceiverRuntime(
     restoreProgressState(expectedManifest, receivedFiles, handlers, seededCommittedBytes);
   }
 
-  const currentDurableProgress = () => {
-    const committed = new Map<string, number>();
-    for (const [fileId, bytes] of state.committedBytesByFileId) {
-      if (bytes > 0 || state.fileStates.get(fileId)?.state === "completed") {
-        committed.set(fileId, bytes);
-      }
-    }
-    return resumeProgressFromManifest(expectedManifest, committed);
-  };
+  const currentDurableProgress = () => receiverResumeProgress(state);
 
   const sendReceiverProgress = () => {
     sendSignal(ws, {
@@ -170,6 +177,17 @@ export async function startReceiverRuntime(
     relayAnnounceTimer ??= setInterval(announceRelay, 250);
   };
 
+  const failRuntime = (error: unknown) => {
+    if (stopped) return;
+    stopped = true;
+    stopRelayAnnouncements();
+    stopRelayCommitQueue();
+    pc.close();
+    ws.close();
+    disposeReceiverState(state);
+    handlers.onError(error instanceof Error ? error.message : "接收文件失败。");
+  };
+
   const processTransferMessage = async (message: TransferProtocolMessage, viaRelay = false) => {
     if (stopped) {
       return;
@@ -177,6 +195,7 @@ export async function startReceiverRuntime(
 
     try {
       await handleProtocolMessage(message, state, handlers, {
+        onAsyncError: failRuntime,
         onChunkCommit(ack) {
           if (stopped) return;
           if (viaRelay || relayRequested) {
@@ -195,24 +214,18 @@ export async function startReceiverRuntime(
         sendSignal(ws, {
           type: "receiver-ready",
           payload: {
-            progress: resumeProgressFromManifest(expectedManifest, state.committedBytesByFileId),
+            progress: currentDurableProgress(),
             completedFiles: state.receivedFiles,
             receiverInstanceId,
           },
         });
       }
     } catch (error) {
-      stopped = true;
-      stopRelayAnnouncements();
-      stopRelayCommitQueue();
-      pc.close();
-      ws.close();
-      handlers.onError(error instanceof Error ? error.message : "接收文件失败。");
+      failRuntime(error);
     }
   };
 
   let processingChain = Promise.resolve();
-
   const handleRelayMessage = (sequence: number, message: TransferProtocolMessage) => {
     if (!relaySequenceInitialized) {
       if (message.type !== "manifest") {
@@ -220,13 +233,19 @@ export async function startReceiverRuntime(
       }
       nextRelaySequence = sequence;
       relaySequenceInitialized = true;
+    } else if (message.type === "manifest") {
+      if (sequence === 0 && nextRelaySequence > 0) {
+        pendingRelayMessages.clear();
+        nextRelaySequence = 0;
+      } else if (sequence < nextRelaySequence) {
+        return;
+      } else if (sequence > nextRelaySequence) {
+        pendingRelayMessages.clear();
+        nextRelaySequence = sequence;
+      }
     }
     if (sequence < nextRelaySequence) {
-      if (sequence !== 0 || message.type !== "manifest") {
-        return;
-      }
-      pendingRelayMessages.clear();
-      nextRelaySequence = 0;
+      return;
     }
 
     pendingRelayMessages.set(sequence, message);
@@ -384,6 +403,9 @@ export async function startReceiverRuntime(
 
     if (message.type === "sender-left") {
       stopRelayCommitQueue();
+      stopped = true;
+      disposeReceiverState(state);
+      pc.close();
       handlers.onEnded();
     }
   });
@@ -391,10 +413,12 @@ export async function startReceiverRuntime(
   ws.addEventListener("close", (event) => {
     if (event.reason === "replaced") {
       stopped = true;
+      disposeReceiverState(state);
       pc.close();
       handlers.onStatus(RECEIVER_REPLACED_STATUS);
     } else if (relayRequested || relayCommitQueue) {
       stopped = true;
+      disposeReceiverState(state);
     }
     stopRelayAnnouncements();
     stopRelayCommitQueue();
@@ -410,6 +434,7 @@ export async function startReceiverRuntime(
   return {
     stop() {
       stopped = true;
+      disposeReceiverState(state);
       stopRelayAnnouncements();
       stopRelayCommitQueue();
       pc.close();
@@ -417,6 +442,7 @@ export async function startReceiverRuntime(
     },
     release() {
       stopped = true;
+      disposeReceiverState(state);
       stopRelayAnnouncements();
       stopRelayCommitQueue();
       pc.close();

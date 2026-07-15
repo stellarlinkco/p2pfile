@@ -9,6 +9,7 @@ import type {
   TransportDiagnostics,
 } from "../lib/transfer";
 import { RECEIVER_REPLACED_STATUS, startReceiverRuntime } from "../lib/transfer";
+import type { TransferRateSampler } from "../lib/transfer/transfer-rate-sampler";
 import { clearReceivedFiles, stopReceiverRuntime } from "./receive-flow-cleanup";
 import {
   nextReceiverStageAfterProgress,
@@ -31,7 +32,8 @@ type ClaimReceiverSessionOptions = {
   session: SessionPublicView | null;
   currentReceiverToken: string | null;
   runtimeRef: RefObject<ReceiverRuntime | null>;
-  sampleRef: RefObject<{ bytes: number; at: number } | null>;
+  speedSampler: TransferRateSampler;
+  progressBytesRef: RefObject<number>;
   receivedFilesRef: RefObject<ReceivedFile[]>;
   setSession: Dispatch<SetStateAction<SessionPublicView | null>>;
   setStage: Dispatch<SetStateAction<ReceiverStage>>;
@@ -61,7 +63,8 @@ export async function claimReceiverSession({
   session,
   currentReceiverToken,
   runtimeRef,
-  sampleRef,
+  speedSampler,
+  progressBytesRef,
   receivedFilesRef,
   setSession,
   setStage,
@@ -88,7 +91,8 @@ export async function claimReceiverSession({
   setError(null);
   setStatus("正在 claim 会话…");
   let runtimeFinished = false;
-  sampleRef.current = null;
+  speedSampler.reset();
+  setSpeed(null);
 
   try {
     const response = await claimSession(session.sessionId, currentReceiverToken);
@@ -96,20 +100,17 @@ export async function claimReceiverSession({
       response.claim === "claimed" &&
       currentReceiverToken !== null &&
       response.receiverToken === currentReceiverToken;
-    const resumedFiles =
-      retryingSameReceiver || (response.claim === "completed" && response.originalReceiver)
-        ? resumeFiles
-        : [];
-    const committedBytesByFileId = resumeCommittedBytesByFileId(
-      session.sessionId,
-      response.session.files,
-      resumedFiles,
-    );
+    const canResumeOwnedState =
+      retryingSameReceiver || (response.claim === "completed" && response.originalReceiver);
+    const resumedFiles = canResumeOwnedState ? resumeFiles : [];
+    const committedBytesByFileId = canResumeOwnedState
+      ? resumeCommittedBytesByFileId(session.sessionId, response.session.files, resumedFiles)
+      : new Map<string, number>();
     if (resumedFiles.length > 0) {
       restoreReceivedFiles(resumedFiles, receivedFilesRef, setReceivedFiles);
-    } else if (!retryingSameReceiver && response.claim === "claimed" && resumeFiles.length > 0) {
-      clearReceivedFiles(receivedFilesRef, setReceivedFiles);
-      void clearCachedReceivedFiles(session.sessionId);
+    } else if (!canResumeOwnedState && response.claim === "claimed") {
+      if (resumeFiles.length > 0) clearReceivedFiles(receivedFilesRef, setReceivedFiles);
+      await clearCachedReceivedFiles(session.sessionId);
     }
     setSession(response.session);
     setProgress(progressFromCommitted(response.session, committedBytesByFileId));
@@ -144,7 +145,7 @@ export async function claimReceiverSession({
       }
       clearReceivedFiles(receivedFilesRef, setReceivedFiles);
       setStage("completion-notice");
-      void clearCachedReceivedFiles(session.sessionId);
+      await clearCachedReceivedFiles(session.sessionId);
       setStatus("Completion Notice：该会话已完成；如需重新接收，请让发送方重新创建。");
       return;
     }
@@ -173,6 +174,7 @@ export async function claimReceiverSession({
                 : nextStatus,
           );
           if (reconnecting) {
+            setSpeed(null);
             setProgress((current) => {
               if (runtimeFinished) {
                 return current;
@@ -205,34 +207,33 @@ export async function claimReceiverSession({
           }
           setTransportDiagnostics(nextDiagnostics);
         },
+        onFileIntegrityFailure(fileId) {
+          clearCachedActiveReceiveProgress(session.sessionId, fileId);
+        },
+        onDurableProgress(fileId, durableBytes) {
+          if (runtimeFinished) {
+            return;
+          }
+          cacheActiveReceiveProgress(
+            session.sessionId,
+            response.session.files,
+            fileId,
+            durableBytes,
+          );
+        },
         onProgress(nextProgress) {
           if (runtimeFinished) {
             return;
           }
+          progressBytesRef.current = nextProgress.completedBytes;
           setProgress(nextProgress);
           setStage((current) => nextReceiverStageAfterProgress(current, runtimeFinished));
-          // Cache OPFS durable checkpoints (128 KiB) so reload resume can start
-          // before the full multi-MiB window fills.
-          if (
-            nextProgress.fileId &&
-            nextProgress.fileBytes > 0 &&
-            (nextProgress.fileBytes % (64 * 1024 * 2) === 0 ||
-              nextProgress.fileBytes === nextProgress.fileTotalBytes)
-          ) {
-            cacheActiveReceiveProgress(
-              session.sessionId,
-              response.session.files,
-              nextProgress.fileId,
-              nextProgress.fileBytes,
-            );
-          }
-          updateSpeed(nextProgress, sampleRef, setSpeed);
+          updateSpeed(nextProgress, speedSampler, setSpeed);
         },
         async onFileReceived(file) {
           if (runtimeFinished) {
             return;
           }
-          clearCachedActiveReceiveProgress(session.sessionId, file.id);
           const next = mergeReceivedFile(receivedFilesRef.current, file, response.session.files);
           receivedFilesRef.current = next;
           setReceivedFiles(next);
@@ -241,6 +242,7 @@ export async function claimReceiverSession({
           );
           if (manifestIndex >= 0) {
             await cacheReceivedFile(session.sessionId, file, manifestIndex);
+            clearCachedActiveReceiveProgress(session.sessionId, file.id);
           }
         },
         onComplete() {
@@ -255,6 +257,7 @@ export async function claimReceiverSession({
             );
             return { id: manifestFile.id, bytes: file?.size ?? 0 };
           });
+          setSpeed(null);
           setStage("completed");
           setStatus("Completed Session View：全部文件已接收并通过字节数校验。");
           void completeSession(
@@ -269,6 +272,7 @@ export async function claimReceiverSession({
             return;
           }
           runtimeFinished = true;
+          setSpeed(null);
           setStage("ended");
           setStatus("Sender-Ended Session：发送方已离开，请请求重新创建会话。");
         },
@@ -277,6 +281,7 @@ export async function claimReceiverSession({
             return;
           }
           runtimeFinished = true;
+          setSpeed(null);
           setError(message);
           setProgress(markIncompleteFileStates);
           setStage("failed");
@@ -363,16 +368,9 @@ function restoreReceivedFiles(
 
 function updateSpeed(
   nextProgress: TransferProgress,
-  sampleRef: RefObject<{ bytes: number; at: number } | null>,
+  speedSampler: TransferRateSampler,
   setSpeed: Dispatch<SetStateAction<number | null>>,
 ) {
-  const now = Date.now();
-  const lastSample = sampleRef.current;
-  if (lastSample) {
-    const elapsed = (now - lastSample.at) / 1000;
-    if (elapsed > 0) {
-      setSpeed(Math.max(0, (nextProgress.completedBytes - lastSample.bytes) / elapsed));
-    }
-  }
-  sampleRef.current = { bytes: nextProgress.completedBytes, at: now };
+  const nextSpeed = speedSampler.sample(nextProgress.completedBytes);
+  if (nextSpeed !== undefined) setSpeed(nextSpeed);
 }

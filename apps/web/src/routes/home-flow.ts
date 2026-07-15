@@ -9,6 +9,7 @@ import {
 } from "../lib/api";
 import type { SenderRuntime, TransferProgress, TransportDiagnostics } from "../lib/transfer";
 import { startSenderRuntime } from "../lib/transfer";
+import { TransferRateSampler } from "../lib/transfer/transfer-rate-sampler";
 
 export type SenderStage =
   | "idle"
@@ -83,9 +84,10 @@ export function useSenderFlow(): SenderFlowState {
   const [progress, setProgress] = useState<TransferProgress>(progressFromFiles([]));
   const [speed, setSpeed] = useState<number | null>(null);
   const runtimeRef = useRef<SenderRuntime | null>(null);
-  const sampleRef = useRef<{ bytes: number; at: number } | null>(null);
+  const speedSampler = useMemo(() => new TransferRateSampler(), []);
   const pendingShareStateRef = useRef<SenderShareState | null>(null);
   const stageRef = useRef<SenderStage>("idle");
+  const progressBytesRef = useRef(0);
 
   const manifest = useMemo(() => manifestFromFiles(selectedFiles), [selectedFiles]);
   const totalBytes = useMemo(() => manifest.reduce((sum, file) => sum + file.size, 0), [manifest]);
@@ -100,6 +102,18 @@ export function useSenderFlow(): SenderFlowState {
   useEffect(() => {
     stageRef.current = stage;
   }, [stage]);
+  useEffect(() => {
+    progressBytesRef.current = progress.completedBytes;
+  }, [progress.completedBytes]);
+
+  useEffect(() => {
+    if (stage !== "transferring") return;
+    const timer = setInterval(() => {
+      const nextSpeed = speedSampler.sample(progressBytesRef.current);
+      if (nextSpeed !== undefined) setSpeed(nextSpeed);
+    }, 250);
+    return () => clearInterval(timer);
+  }, [speedSampler, stage]);
 
   useEffect(() => {
     const handleUnload = () => {
@@ -137,7 +151,8 @@ export function useSenderFlow(): SenderFlowState {
     setMode(null);
     setTransportDiagnostics(null);
     setSpeed(null);
-    sampleRef.current = null;
+    speedSampler.reset();
+    progressBytesRef.current = 0;
     setProgress(progressFromFiles(selectedFiles));
 
     let createdSession: { sessionId: string; senderToken: string } | null = null;
@@ -163,6 +178,7 @@ export function useSenderFlow(): SenderFlowState {
         manifest,
         {
           onStatus(nextStatus) {
+            if (nextStatus === "Waiting for peer reconnect") setSpeed(null);
             setStatus(nextStatus);
             setStage(
               nextStatus.includes("Transfer") || nextStatus.includes("Transferring")
@@ -177,23 +193,19 @@ export function useSenderFlow(): SenderFlowState {
             setTransportDiagnostics(nextDiagnostics);
           },
           onProgress(nextProgress) {
+            progressBytesRef.current = nextProgress.completedBytes;
             setProgress(nextProgress);
             setStage("transferring");
-            const now = Date.now();
-            const lastSample = sampleRef.current;
-            if (lastSample) {
-              const elapsed = (now - lastSample.at) / 1000;
-              if (elapsed > 0) {
-                setSpeed(Math.max(0, (nextProgress.completedBytes - lastSample.bytes) / elapsed));
-              }
-            }
-            sampleRef.current = { bytes: nextProgress.completedBytes, at: now };
+            const nextSpeed = speedSampler.sample(nextProgress.completedBytes);
+            if (nextSpeed !== undefined) setSpeed(nextSpeed);
           },
           onComplete() {
+            setSpeed(null);
             setStage("completed");
             setStatus("Completed Session View：所有文件已发送完成。");
           },
           onError(message) {
+            setSpeed(null);
             setError(message);
             setStage("failed");
             setStatus("连接失败。请重新创建会话。");

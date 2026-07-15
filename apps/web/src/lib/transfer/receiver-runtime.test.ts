@@ -151,24 +151,25 @@ test("receiver forwards relay chunk-commit only after relay chunk is verified an
     const digest = createSha256Digest();
     digest.update(bytes.buffer);
     const chunkDigest = digest.digestHex();
+    const relayManifest = {
+      type: "relay-message" as const,
+      payload: {
+        sequence: 0,
+        message: {
+          type: "manifest" as const,
+          files: [file],
+          totalBytes: file.size,
+          manifestHash: `${file.id}:${file.name}:${file.size}`,
+        },
+      },
+    };
 
     try {
       const socket = FakeWebSocket.instances[0];
       if (!socket) throw new Error("expected receiver socket");
       const relayCommits = () => socket.sent.filter((message) => message.type === "relay-message");
       socket.dispatchMessage({ type: "mode", payload: { mode: "relay" } });
-      socket.dispatchMessage({
-        type: "relay-message",
-        payload: {
-          sequence: 0,
-          message: {
-            type: "manifest",
-            files: [file],
-            totalBytes: file.size,
-            manifestHash: `${file.id}:${file.name}:${file.size}`,
-          },
-        },
-      });
+      socket.dispatchMessage(relayManifest);
       socket.dispatchMessage({
         type: "relay-message",
         payload: {
@@ -202,14 +203,22 @@ test("receiver forwards relay chunk-commit only after relay chunk is verified an
           },
         },
       });
-      await Bun.sleep(300);
+      await Bun.sleep(1_100);
       expect(relayCommits().length).toBeGreaterThan(1);
       socket.dispatchMessage({ type: "relay-ack", payload: { sequence: 0 } });
       const commitsAfterAck = relayCommits().length;
-      await Bun.sleep(300);
+      await Bun.sleep(1_100);
       expect(relayCommits()).toHaveLength(commitsAfterAck);
+      socket.dispatchMessage(relayManifest);
+      socket.dispatchMessage({
+        type: "relay-message",
+        payload: {
+          sequence: 1,
+          message: { type: "file-start", file, offset: MANIFEST_CHUNK_BYTES },
+        },
+      });
       socket.dispatchBlob(
-        encodeBinaryRelayChunkFrame(3, {
+        encodeBinaryRelayChunkFrame(2, {
           type: "chunk",
           fileId: file.id,
           chunkIndex: 1,
@@ -219,6 +228,13 @@ test("receiver forwards relay chunk-commit only after relay chunk is verified an
         }),
       );
       await Bun.sleep(50);
+      expect(
+        relayCommits().some(
+          (message) =>
+            message.payload.message.type === "chunk-commit" &&
+            message.payload.message.chunkIndex === 1,
+        ),
+      ).toBeTrue();
       const commitsBeforeClose = relayCommits().length;
       socket.close();
       await Bun.sleep(300);

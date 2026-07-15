@@ -142,8 +142,7 @@ export function mergeResumeProgress(
         chunkSize: currentFile.chunkSize,
         committedBytes,
         completed:
-          committedBytes === currentFile.size &&
-          (currentFile.completed || nextFile.completed || currentFile.size > 0),
+          committedBytes === currentFile.size && (currentFile.completed || nextFile.completed),
       };
     }),
   } satisfies ResumeProgress;
@@ -231,6 +230,7 @@ export async function sendFiles(
       shouldPause: (progress) => pauseTarget === completedFilesFromProgress(progress),
       transport: {
         beforeChunk: () => awaitBufferedAmount(channel),
+        bufferedBytes: () => channel.bufferedAmount,
         complete: (totalBytes) => sendProtocolMessage(channel, { type: "complete", totalBytes }),
         endFile: (file, bytes, digest) =>
           sendProtocolMessage(channel, { type: "file-end", fileId: file.id, bytes, digest }),
@@ -283,58 +283,65 @@ export async function sendFilesViaRelay(
 ) {
   const resume = normalizeResumeProgress(plan, coerceResumeProgress(plan, progress));
   const pauseTarget = pauseAfterCompletedFiles();
-  // WS relay has higher RTT and retry cost than DataChannel. Eight 64 KiB
-  // chunks cover the relay RTT while retaining a bounded 512 KiB byte window.
-  const relayScheduler: Partial<TransferSchedulerOptions> = {
-    maxInFlightBytes: MANIFEST_CHUNK_BYTES * 8,
-    ...scheduler,
-  };
 
   handlers.onMode("relay");
-  await sendScheduledTransfer(files, {
-    handlers,
-    mode: "relay",
-    onResumeProgress,
-    plan,
-    progress: resume,
-    recordEvent: recordTransferTestEvent,
-    scheduler: relayScheduler,
-    shouldContinue,
-    shouldPause: (progress) => pauseTarget === completedFilesFromProgress(progress),
-    transport: {
-      complete: (totalBytes) => queue.send({ type: "complete", totalBytes }),
-      endFile: (file, bytes, digest) =>
-        queue.send({ type: "file-end", fileId: file.id, bytes, digest }),
-      async sendChunk(chunk) {
-        const commit = queue.awaitCommit(
-          chunk.file.id,
-          chunk.chunkIndex,
-          chunk.offset + chunk.bytes.byteLength,
-        );
-        // A receiver restart can reset this queue before delivery resolves.
-        // Keep the rejection observed until the scheduler awaits the same promise.
-        void commit.catch(() => undefined);
-        await queue.send({
-          type: "chunk",
-          fileId: chunk.file.id,
-          chunkIndex: chunk.chunkIndex,
-          offset: chunk.offset,
-          bytes: chunk.bytes,
-          chunkDigest: chunk.chunkDigest,
-        });
-        // Start commit timeout only after delivery-ack so OPFS RTT is not
-        // charged against the transport RTT budget.
-        queue.armCommitTimeout(chunk.file.id, chunk.chunkIndex);
-        return commit;
+  try {
+    await sendScheduledTransfer(files, {
+      handlers,
+      mode: "relay",
+      onResumeProgress,
+      plan,
+      progress: resume,
+      recordEvent: recordTransferTestEvent,
+      scheduler,
+      shouldContinue,
+      shouldPause: (progress) => pauseTarget === completedFilesFromProgress(progress),
+      transport: {
+        bufferedBytes: () => queue.pendingWireByteLength(),
+        complete: (totalBytes) => queue.send({ type: "complete", totalBytes }),
+        endFile: (file, bytes, digest) =>
+          queue.send({ type: "file-end", fileId: file.id, bytes, digest }),
+        async sendChunk(chunk) {
+          const commit = queue.awaitCommit(
+            chunk.file.id,
+            chunk.chunkIndex,
+            chunk.offset + chunk.bytes.byteLength,
+          );
+          // A receiver restart can reset this queue before delivery resolves.
+          // Keep the rejection observed until the scheduler awaits the same promise.
+          void commit.catch(() => undefined);
+          await queue.send({
+            type: "chunk",
+            fileId: chunk.file.id,
+            chunkIndex: chunk.chunkIndex,
+            offset: chunk.offset,
+            bytes: chunk.bytes,
+            chunkDigest: chunk.chunkDigest,
+          });
+          // Start commit timeout only after delivery ACK so receiver commit latency
+          // remains separate from Relay delivery RTT.
+          queue.armCommitTimeout(chunk.file.id, chunk.chunkIndex);
+          return commit;
+        },
+        sendManifest: (nextPlan) =>
+          queue.send({
+            type: "manifest",
+            files: nextPlan.manifest,
+            totalBytes: nextPlan.totalBytes,
+            manifestHash: nextPlan.manifestHash,
+          }),
+        startFile: (file, offset) => queue.send({ type: "file-start", file, offset }),
       },
-      sendManifest: (nextPlan) =>
-        queue.send({
-          type: "manifest",
-          files: nextPlan.manifest,
-          totalBytes: nextPlan.totalBytes,
-          manifestHash: nextPlan.manifestHash,
-        }),
-      startFile: (file, offset) => queue.send({ type: "file-start", file, offset }),
-    },
-  });
+    });
+  } finally {
+    const telemetry = queue.takeTelemetry();
+    recordTransferTestEvent({
+      type: "relay-delivery-telemetry",
+      ...telemetry,
+      wireByteAmplification:
+        telemetry.originalWireBytes > 0
+          ? telemetry.transmittedWireBytes / telemetry.originalWireBytes
+          : 1,
+    });
+  }
 }

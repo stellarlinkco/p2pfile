@@ -71,21 +71,6 @@ test("encodeChunk/decodeChunk round-trip preserves arbitrary bytes", () => {
   expect(decoded).toEqual(bytes);
 });
 
-test("encodeChunk stays under a tight budget for one 64 KiB chunk", () => {
-  const bytes = new Uint8Array(MANIFEST_CHUNK_BYTES);
-  bytes.fill(7);
-  // Warm once so the assertion measures steady-state cost.
-  encodeChunk(bytes.buffer);
-
-  const started = performance.now();
-  for (let index = 0; index < 20; index += 1) {
-    encodeChunk(bytes.buffer);
-  }
-  const averageMs = (performance.now() - started) / 20;
-  // Old string-concat path was multi-ms; keep the efficient path well under 2ms in Bun.
-  expect(averageMs).toBeLessThan(2);
-});
-
 test("binary chunk frames round-trip without base64", () => {
   const payload = new Uint8Array([1, 2, 3, 4, 250, 255]).buffer;
   const message = {

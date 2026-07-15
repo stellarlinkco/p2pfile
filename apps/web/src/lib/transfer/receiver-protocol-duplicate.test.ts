@@ -140,3 +140,38 @@ test("duplicate committed chunk re-acks without rewriting or double-counting pro
   expect(state.failed).toBe(false);
   expect(context.state).toBe("completed");
 });
+
+test("whole-file integrity failure invalidates resumable progress", async () => {
+  const file = { id: "file-1", name: "alpha.txt", size: 5 };
+  const bytes = bytesOf("alpha");
+  const invalidated: string[] = [];
+  const state = buildReceiverState([file]);
+  const handlers = receiverHandlersWith({
+    onFileIntegrityFailure(fileId) {
+      invalidated.push(fileId);
+    },
+  });
+  await handleProtocolMessage({ type: "file-start", file, offset: 0 }, state, handlers);
+  await handleProtocolMessage(
+    {
+      type: "chunk",
+      fileId: file.id,
+      chunkIndex: 0,
+      offset: 0,
+      bytes,
+      chunkDigest: await sha256Buffer(bytes),
+    },
+    state,
+    handlers,
+  );
+
+  await expect(
+    handleProtocolMessage(
+      { type: "file-end", fileId: file.id, bytes: file.size, digest: "invalid-digest" },
+      state,
+      handlers,
+    ),
+  ).rejects.toThrow("File integrity verification failed.");
+  expect(invalidated).toEqual([file.id]);
+  expect(state.committedBytesByFileId.get(file.id)).toBe(0);
+});

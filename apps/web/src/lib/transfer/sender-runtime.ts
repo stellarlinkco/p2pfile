@@ -1,4 +1,4 @@
-import type { FileManifestItem, ResumeProgress } from "@p2pfile/shared";
+import { type FileManifestItem, MANIFEST_CHUNK_BYTES, type ResumeProgress } from "@p2pfile/shared";
 import { getSession, getSignalUrl } from "../api";
 import { RelayMessageQueue } from "./relay-queue";
 import {
@@ -82,6 +82,19 @@ export async function startSenderRuntime(
 
   const markCompleted = () => {
     if (completed) return;
+    receiverProgress = {
+      manifestHash: plan.manifestHash,
+      files: plan.manifest.map((file) => ({
+        fileId: file.id,
+        size: file.size,
+        chunkSize:
+          receiverProgress.files.find((progress) => progress.fileId === file.id)?.chunkSize ??
+          MANIFEST_CHUNK_BYTES,
+        committedBytes: file.size,
+        completed: true,
+      })),
+    };
+    reportResumeProgress(plan, receiverProgress, handlers);
     completed = true;
     transferring = false;
     queue.reset();
@@ -105,6 +118,12 @@ export async function startSenderRuntime(
 
   const currentTransferActive = (token: number) =>
     !stopped && !completed && transferring && token === transferToken;
+  const activeTransferHandlers = (token: number): SenderRuntimeHandlers => ({
+    ...handlers,
+    onProgress(nextProgress) {
+      if (currentTransferActive(token)) handlers.onProgress(nextProgress);
+    },
+  });
   const waitForCompletedSessionView = async (token: number) => {
     while (currentTransferActive(token)) {
       const session = await getSession(sessionId);
@@ -147,7 +166,7 @@ export async function startSenderRuntime(
         nextChannel,
         files,
         plan,
-        handlers,
+        activeTransferHandlers(token),
         receiverProgress,
         () => currentTransferActive(token) && channel === nextChannel,
         updateReceiverProgress,
@@ -186,7 +205,7 @@ export async function startSenderRuntime(
         queue,
         files,
         plan,
-        handlers,
+        activeTransferHandlers(token),
         receiverProgress,
         () => currentTransferActive(token),
         (progress) => {
@@ -285,6 +304,7 @@ export async function startSenderRuntime(
   const handleReceiverReady = (
     payload: Extract<BrowserSignalMessage, { type: "receiver-ready" }>["payload"],
   ) => {
+    if (completed || stopped) return;
     recordSenderTestEvent({ type: "sender-receiver-ready", mode: fallback.mode });
     const nextInstanceId =
       typeof payload.receiverInstanceId === "string" ? payload.receiverInstanceId : null;
@@ -293,7 +313,6 @@ export async function startSenderRuntime(
       receiverInstanceId = nextInstanceId;
     }
     const progressChanged = updateReceiverProgress(payload.progress, receiverRestarted);
-    if (completed || stopped) return;
     if (!receiverProgressIsComplete() && (receiverRestarted || (transferring && progressChanged))) {
       // A restarted receiver must not retain an in-flight transfer or relay decision.
       transferToken += 1;

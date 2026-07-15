@@ -63,41 +63,19 @@ export async function disableOpfsOnPage(page: Page) {
 
 export async function failOpfsWritesOnPage(page: Page) {
   await page.addInitScript(() => {
-    const originalGetDirectory = navigator.storage?.getDirectory?.bind(navigator.storage);
-    if (!originalGetDirectory) return;
-
-    Object.defineProperty(navigator.storage, "getDirectory", {
+    const NativeWorker = window.Worker;
+    class FaultInjectingWorker extends NativeWorker {
+      constructor(scriptURL: string | URL, options?: WorkerOptions) {
+        const url = new URL(scriptURL, window.location.href);
+        if (url.pathname.endsWith("/receiver-opfs.worker.ts")) {
+          url.searchParams.set("__p2pfile_fail_opfs_writes", "1");
+        }
+        super(url, options);
+      }
+    }
+    Object.defineProperty(window, "Worker", {
       configurable: true,
-      value: async () => {
-        const root = await originalGetDirectory();
-        return new Proxy(root, {
-          get(target, property, receiver) {
-            const value = Reflect.get(target, property, receiver);
-            if (property !== "getFileHandle" || typeof value !== "function") {
-              return typeof value === "function" ? value.bind(target) : value;
-            }
-            return async (name: string, options?: FileSystemGetFileOptions) => {
-              const handle = await Reflect.apply(value, target, [name, options]);
-              return new Proxy(handle, {
-                get(handleTarget, handleProperty, handleReceiver) {
-                  const handleValue = Reflect.get(handleTarget, handleProperty, handleReceiver);
-                  if (handleProperty === "createWritable" && typeof handleValue === "function") {
-                    return async () => ({
-                      write: async () => {
-                        throw new Error("OPFS write quota exceeded");
-                      },
-                      close: async () => {},
-                    });
-                  }
-                  return typeof handleValue === "function"
-                    ? handleValue.bind(handleTarget)
-                    : handleValue;
-                },
-              });
-            };
-          },
-        });
-      },
+      value: FaultInjectingWorker,
     });
   });
 }

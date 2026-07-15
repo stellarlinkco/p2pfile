@@ -20,6 +20,9 @@ dev-cloudflare:
 deploy-cloudflare:
   bun run deploy:cloudflare
 
+benchmark-wan:
+  bun run benchmark:wan
+
 lint:
   bun run lint
 

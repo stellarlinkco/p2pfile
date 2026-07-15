@@ -4,12 +4,20 @@ import {
   CompleteSessionRequestSchema,
   CreateSessionRequestSchema,
   DEFAULT_RETRY_BUDGET,
+  matchesSessionToken,
   ReleaseSessionResponseSchema,
   ResumeProgressSchema,
   resumeProgressFromManifest,
   SessionStateSchema,
   SignalEnvelopeSchema,
 } from "./session";
+
+test("session token matching rejects missing and unequal credentials", () => {
+  expect(matchesSessionToken("sender-token", "sender-token")).toBeTrue();
+  expect(matchesSessionToken("sender-token", "sender-tokem")).toBeFalse();
+  expect(matchesSessionToken("sender-token", "short")).toBeFalse();
+  expect(matchesSessionToken("sender-token", null)).toBeFalse();
+});
 
 test("claimed claim response carries retriesRemaining from the default retry budget", () => {
   const parsed = ClaimSessionResponseSchema.parse({

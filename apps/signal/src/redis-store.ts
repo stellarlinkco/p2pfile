@@ -6,6 +6,7 @@ import {
   CreateSessionResponseSchema,
   DEFAULT_RETRY_BUDGET,
   type EndSessionRequest,
+  matchesSessionToken,
   type ReleaseSessionRequest,
   ReleaseSessionResponseSchema,
   SessionMutationResponseSchema,
@@ -105,9 +106,8 @@ export class RedisSessionStore {
   }
 
   async validateReceiverToken(sessionId: string, receiverToken: string) {
-    return this.withSessionMutation(
-      sessionId,
-      async () => (await this.load(sessionId))?.receiverToken === receiverToken,
+    return this.withSessionMutation(sessionId, async () =>
+      matchesSessionToken((await this.load(sessionId))?.receiverToken, receiverToken),
     );
   }
 
@@ -126,7 +126,7 @@ export class RedisSessionStore {
       return terminalClaim;
     }
     if (isActiveSessionState(session.state)) {
-      if (receiverToken && receiverToken === session.receiverToken) {
+      if (receiverToken && matchesSessionToken(session.receiverToken, receiverToken)) {
         if (session.retriesRemaining <= 0) {
           session.state = "failed";
           session.failureReason = "retry-budget-exhausted";
@@ -171,7 +171,10 @@ export class RedisSessionStore {
   private async releaseSessionUnlocked(sessionId: string, input: ReleaseSessionRequest) {
     const session = await this.load(sessionId);
     if (!session) return null;
-    if (!isActiveSessionState(session.state) || session.receiverToken !== input.receiverToken) {
+    if (
+      !isActiveSessionState(session.state) ||
+      !matchesSessionToken(session.receiverToken, input.receiverToken)
+    ) {
       return ReleaseSessionResponseSchema.parse({
         status: "invalid-token",
         session: toPublicSession(session),
@@ -201,7 +204,7 @@ export class RedisSessionStore {
     if (
       !session ||
       !isActiveSessionState(session.state) ||
-      session.receiverToken !== input.receiverToken
+      !matchesSessionToken(session.receiverToken, input.receiverToken)
     )
       return null;
     const completedAt = this.now();
@@ -219,7 +222,7 @@ export class RedisSessionStore {
 
   private async endSessionUnlocked(sessionId: string, input: EndSessionRequest) {
     const session = await this.load(sessionId);
-    if (!session || session.senderToken !== input.senderToken) return null;
+    if (!session || !matchesSessionToken(session.senderToken, input.senderToken)) return null;
     if (
       session.state !== "completed-view" &&
       session.state !== "ended" &&
@@ -256,8 +259,8 @@ export class RedisSessionStore {
       session.state === "failed"
     )
       return false;
-    if (role === "sender" && session.senderToken !== token) return false;
-    if (role === "receiver" && session.receiverToken !== token) return false;
+    if (role === "sender" && !matchesSessionToken(session.senderToken, token)) return false;
+    if (role === "receiver" && !matchesSessionToken(session.receiverToken, token)) return false;
     this.sockets.attach(sessionId, role as SessionRole, socket);
     if (role === "sender") {
       session.senderLastSeenAt = this.now();
@@ -290,8 +293,8 @@ export class RedisSessionStore {
   ) {
     const session = await this.load(sessionId);
     if (!session || session.state === "ended" || session.state === "failed") return;
-    if (role === "sender" && session.senderToken !== token) return;
-    if (role === "receiver" && session.receiverToken !== token) return;
+    if (role === "sender" && !matchesSessionToken(session.senderToken, token)) return;
+    if (role === "receiver" && !matchesSessionToken(session.receiverToken, token)) return;
     const sessionSockets = this.sockets.get(sessionId);
     if (socket && sessionSockets?.[role as SessionRole] !== socket) return;
     if (role === "sender" && session.state !== "completed-view") {
@@ -333,8 +336,8 @@ export class RedisSessionStore {
   ) {
     const session = await this.load(sessionId);
     if (!session || session.state === "failed" || session.state === "ended") return false;
-    if (role === "sender" && session.senderToken !== token) return false;
-    if (role === "receiver" && session.receiverToken !== token) return false;
+    if (role === "sender" && !matchesSessionToken(session.senderToken, token)) return false;
+    if (role === "receiver" && !matchesSessionToken(session.receiverToken, token)) return false;
     const signalRole = role as SessionRole;
     const isCurrentSocket = () =>
       socket === undefined || this.sockets.isCurrent(sessionId, signalRole, socket);

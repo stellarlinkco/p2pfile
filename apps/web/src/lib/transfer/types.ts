@@ -79,6 +79,8 @@ export type ReceivedFile = {
 };
 
 export type ReceiverRuntimeHandlers = SenderRuntimeHandlers & {
+  onDurableProgress?: (fileId: string, durableBytes: number) => void;
+  onFileIntegrityFailure?: (fileId: string) => void;
   onFileReceived: (file: ReceivedFile) => void | Promise<void>;
   onEnded: () => void;
 };

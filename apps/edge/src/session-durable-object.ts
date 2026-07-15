@@ -7,6 +7,7 @@ import {
   DEFAULT_RETRY_BUDGET,
   type EndSessionRequest,
   EndSessionRequestSchema,
+  matchesSessionToken,
   ReceiverTokenValidationResponseSchema,
   type ReleaseSessionRequest,
   ReleaseSessionRequestSchema,
@@ -87,7 +88,7 @@ export class SessionDurableObject implements DurableObject {
         ReceiverTokenValidationResponseSchema.parse({
           valid:
             session.receiverToken !== null &&
-            request.headers.get("x-receiver-token") === session.receiverToken,
+            matchesSessionToken(session.receiverToken, request.headers.get("x-receiver-token")),
         }),
       );
     }
@@ -172,7 +173,7 @@ export class SessionDurableObject implements DurableObject {
         ClaimSessionResponseSchema.parse({
           status: "completed",
           originalReceiver: Boolean(
-            input.receiverToken && input.receiverToken === session.receiverToken,
+            input.receiverToken && matchesSessionToken(session.receiverToken, input.receiverToken),
           ),
           session: toPublicSession(session),
         }),
@@ -180,7 +181,7 @@ export class SessionDurableObject implements DurableObject {
     }
 
     if (isActiveSession(session)) {
-      if (input.receiverToken && input.receiverToken === session.receiverToken) {
+      if (input.receiverToken && matchesSessionToken(session.receiverToken, input.receiverToken)) {
         if (session.retriesRemaining <= 0) {
           session.state = "failed";
           session.retriesRemaining = 0;
@@ -228,7 +229,10 @@ export class SessionDurableObject implements DurableObject {
   }
 
   private async release(session: SessionRecord, input: ReleaseSessionRequest) {
-    if (!isActiveSession(session) || input.receiverToken !== session.receiverToken) {
+    if (
+      !isActiveSession(session) ||
+      !matchesSessionToken(session.receiverToken, input.receiverToken)
+    ) {
       return json(
         ReleaseSessionResponseSchema.parse({
           status: "invalid-token",
@@ -249,7 +253,10 @@ export class SessionDurableObject implements DurableObject {
   }
 
   private async complete(session: SessionRecord, input: CompleteSessionRequest) {
-    if (!isActiveSession(session) || input.receiverToken !== session.receiverToken)
+    if (
+      !isActiveSession(session) ||
+      !matchesSessionToken(session.receiverToken, input.receiverToken)
+    )
       return notFound("session not found");
     if (!matchesCompletedManifest(session, input))
       return json({ message: "manifest integrity check incomplete" }, { status: 409 });
@@ -266,7 +273,7 @@ export class SessionDurableObject implements DurableObject {
   }
 
   private async end(session: SessionRecord, input: EndSessionRequest) {
-    if (input.senderToken !== session.senderToken)
+    if (!matchesSessionToken(session.senderToken, input.senderToken))
       return json({ message: "invalid token" }, { status: 401 });
     const ended = await this.markSenderEnded(session, "sender-ended");
     return json(SessionMutationResponseSchema.parse({ ok: true, session: toPublicSession(ended) }));
@@ -297,9 +304,13 @@ export class SessionDurableObject implements DurableObject {
 
   private handleWebSocket(session: SessionRecord, role: SessionRole, token: string) {
     const validSender =
-      role === "sender" && session.senderToken === token && isSenderLiveSession(session);
+      role === "sender" &&
+      matchesSessionToken(session.senderToken, token) &&
+      isSenderLiveSession(session);
     const validReceiver =
-      role === "receiver" && session.receiverToken === token && isActiveSession(session);
+      role === "receiver" &&
+      matchesSessionToken(session.receiverToken, token) &&
+      isActiveSession(session);
     if (!validSender && !validReceiver)
       return json({ message: "invalid session websocket" }, { status: 401 });
 

@@ -6,6 +6,7 @@ import {
   CreateSessionResponseSchema,
   DEFAULT_RETRY_BUDGET,
   type EndSessionRequest,
+  matchesSessionToken,
   type ReleaseSessionRequest,
   ReleaseSessionResponseSchema,
   SessionMutationResponseSchema,
@@ -97,7 +98,7 @@ export class LiveSessionStore {
 
   validateReceiverToken(sessionId: string, receiverToken: string) {
     this.sweepExpired();
-    return this.sessions.get(sessionId)?.receiverToken === receiverToken;
+    return matchesSessionToken(this.sessions.get(sessionId)?.receiverToken, receiverToken);
   }
 
   claimSession(sessionId: string, receiverToken?: string) {
@@ -119,12 +120,14 @@ export class LiveSessionStore {
     if (session.state === "completed-view") {
       return ClaimSessionResponseSchema.parse({
         status: "completed",
-        originalReceiver: Boolean(receiverToken && receiverToken === session.receiverToken),
+        originalReceiver: Boolean(
+          receiverToken && matchesSessionToken(session.receiverToken, receiverToken),
+        ),
         session: toPublicSession(session),
       });
     }
     if (isActiveSessionState(session.state)) {
-      if (receiverToken && receiverToken === session.receiverToken) {
+      if (receiverToken && matchesSessionToken(session.receiverToken, receiverToken)) {
         if (session.retriesRemaining <= 0) {
           markSessionFailed(session, "retry-budget-exhausted");
           return ClaimSessionResponseSchema.parse({
@@ -161,7 +164,10 @@ export class LiveSessionStore {
     this.sweepExpired();
     const session = this.sessions.get(sessionId);
     if (!session) return null;
-    if (!isActiveSessionState(session.state) || session.receiverToken !== input.receiverToken) {
+    if (
+      !isActiveSessionState(session.state) ||
+      !matchesSessionToken(session.receiverToken, input.receiverToken)
+    ) {
       return ReleaseSessionResponseSchema.parse({
         status: "invalid-token",
         session: toPublicSession(session),
@@ -185,7 +191,7 @@ export class LiveSessionStore {
     if (
       !session ||
       !isActiveSessionState(session.state) ||
-      session.receiverToken !== input.receiverToken
+      !matchesSessionToken(session.receiverToken, input.receiverToken)
     )
       return null;
     const completedAt = this.now();
@@ -200,7 +206,7 @@ export class LiveSessionStore {
   endSession(sessionId: string, input: EndSessionRequest) {
     this.sweepExpired();
     const session = this.sessions.get(sessionId);
-    if (!session || session.senderToken !== input.senderToken) return null;
+    if (!session || !matchesSessionToken(session.senderToken, input.senderToken)) return null;
     if (session.state !== "completed-view") {
       markSessionEnded(session, this.now(), "sender-ended");
     }

@@ -18,7 +18,11 @@ function trackQueue(queue: RelayMessageQueue) {
 
 test("relay queue rejects when acknowledgement never arrives", async () => {
   const queue = trackQueue(
-    new RelayMessageQueue(() => undefined, { ackTimeoutMs: 10, resendMs: 60_000 }),
+    new RelayMessageQueue(() => undefined, {
+      ackTimeoutMs: 10,
+      initialRtoMs: 60_000,
+      maxRtoMs: 60_000,
+    }),
   );
 
   await expect(queue.send({ type: "complete", totalBytes: 1 })).rejects.toThrow(
@@ -140,7 +144,7 @@ test("relay queue resends with exponential backoff instead of a fixed interval",
       () => {
         sentAt.push(Date.now());
       },
-      { ackTimeoutMs: 80, resendMs: 10, maxResendMs: 40 },
+      { ackTimeoutMs: 80, initialRtoMs: 10, minRtoMs: 10, maxRtoMs: 40 },
     ),
   );
 
@@ -151,6 +155,109 @@ test("relay queue resends with exponential backoff instead of a fixed interval",
   const gaps = sentAt.slice(1).map((value, index) => value - (sentAt[index] ?? value));
   // Later gaps should not all equal the initial 10ms fixed cadence.
   expect(Math.max(...gaps)).toBeGreaterThanOrEqual(20);
+});
+
+test("healthy 500ms delivery ACK does not trigger a pre-ACK resend", async () => {
+  const wires: Array<string | ArrayBuffer> = [];
+  const queue = trackQueue(
+    new RelayMessageQueue((wire) => {
+      wires.push(wire);
+    }),
+  );
+  const pending = queue.send({ type: "complete", totalBytes: 1 });
+
+  await Bun.sleep(500);
+  expect(wires).toHaveLength(1);
+  queue.acknowledge(0);
+  await pending;
+
+  const telemetry = queue.getTelemetry();
+  expect(telemetry.applicationResends).toBe(0);
+  expect(telemetry.deliveryAckRttMs).toHaveLength(1);
+  expect(telemetry.deliveryAckRttMs[0]).toBeGreaterThanOrEqual(450);
+  expect(telemetry.pendingWireBytes).toBe(0);
+  expect(telemetry.currentRtoMs).toBeGreaterThanOrEqual(1_350);
+});
+
+test("ACK after a resend resolves delivery without contaminating RTT sampling", async () => {
+  const wires: Array<string | ArrayBuffer> = [];
+  const queue = trackQueue(
+    new RelayMessageQueue(
+      (wire) => {
+        wires.push(wire);
+      },
+      {
+        ackTimeoutMs: 500,
+        initialRtoMs: 10,
+        minRtoMs: 10,
+        maxRtoMs: 40,
+      },
+    ),
+  );
+  const pending = queue.send({ type: "complete", totalBytes: 1 });
+  await Bun.sleep(25);
+  queue.acknowledge(0);
+  await pending;
+
+  const telemetry = queue.getTelemetry();
+  expect(wires.length).toBeGreaterThanOrEqual(2);
+  expect(telemetry.applicationResends).toBeGreaterThanOrEqual(1);
+  expect(telemetry.deliveryAckRttMs).toEqual([]);
+  expect(telemetry.ineligibleDeliveryAckSamples).toBe(1);
+  expect(telemetry.transmittedWireBytes).toBeGreaterThan(telemetry.originalWireBytes);
+  expect(telemetry.peakPendingWireBytes).toBe(telemetry.originalWireBytes);
+  expect(telemetry.pendingWireBytes).toBe(0);
+});
+
+test("relay telemetry survives generation reset until it is consumed", async () => {
+  const queue = trackQueue(
+    new RelayMessageQueue(() => undefined, {
+      initialRtoMs: 100,
+      minRtoMs: 10,
+      maxRtoMs: 1_000,
+    }),
+  );
+  const pending = queue.send({ type: "complete", totalBytes: 1 });
+  await Bun.sleep(20);
+  queue.acknowledge(0);
+  await pending;
+
+  const learnedRtoMs = queue.getTelemetry().currentRtoMs;
+  queue.reset();
+  const telemetry = queue.takeTelemetry();
+
+  expect(telemetry.deliveryAckRttMs).toHaveLength(1);
+  expect(telemetry.currentRtoMs).toBe(learnedRtoMs);
+  expect(queue.getTelemetry().deliveryAckRttMs).toEqual([]);
+  expect(queue.getTelemetry().currentRtoMs).toBe(100);
+
+  const second = queue.send({ type: "complete", totalBytes: 2 });
+  await Bun.sleep(20);
+  queue.acknowledge(1);
+  await second;
+  queue.takeTelemetry();
+  queue.reset();
+  expect(queue.getTelemetry().currentRtoMs).toBe(100);
+
+  const rolloverPending = queue.send({ type: "complete", totalBytes: 3 });
+  const livePendingBytes = queue.pendingWireByteLength();
+  expect(livePendingBytes).toBeGreaterThan(0);
+  expect(queue.takeTelemetry().pendingWireBytes).toBe(livePendingBytes);
+  expect(queue.pendingWireByteLength()).toBe(livePendingBytes);
+  await Bun.sleep(20);
+  queue.acknowledge(2);
+  await rolloverPending;
+  const rolloverLearnedRtoMs = queue.getTelemetry().currentRtoMs;
+  queue.reset();
+  const rolloverTelemetry = queue.takeTelemetry();
+  expect(rolloverTelemetry.deliveryAckRttMs).toHaveLength(1);
+  expect(rolloverTelemetry.currentRtoMs).toBe(rolloverLearnedRtoMs);
+
+  const unacknowledged = queue.send({ type: "complete", totalBytes: 4 });
+  expect(queue.pendingWireByteLength()).toBeGreaterThan(0);
+  queue.reset();
+  await expect(unacknowledged).rejects.toThrow("Transfer restarted.");
+  expect(queue.pendingWireByteLength()).toBe(0);
 });
 
 test("relay queue limits unacked messages before accepting more sends", async () => {

@@ -1,5 +1,6 @@
 import { type FileManifestItem, MANIFEST_CHUNK_BYTES, type ResumeProgress } from "@p2pfile/shared";
 import { createSha256Digest, type Sha256Digest } from "./digest";
+import { type TransferFlowControl, TransferFlowController } from "./flow-control";
 import type {
   SenderRuntimeHandlers,
   TransferFileProgress,
@@ -9,15 +10,12 @@ import type {
 
 export type TransferSchedulerOptions = {
   maxActiveFiles: number;
-  maxInFlightBytes: number;
+  flowControl: TransferFlowControl;
 };
 
-export const DEFAULT_TRANSFER_SCHEDULER: TransferSchedulerOptions = {
+export const DEFAULT_TRANSFER_SCHEDULER = {
   maxActiveFiles: 2,
-  // 16 chunks × 64 KiB = 1 MiB pipeline window. It removes the single-chunk
-  // RTT ceiling while keeping receiver reload/reconnect recovery bounded.
-  maxInFlightBytes: MANIFEST_CHUNK_BYTES * 16,
-};
+} as const;
 
 type TransferPlan = {
   manifest: FileManifestItem[];
@@ -35,6 +33,7 @@ type ScheduledChunk = {
 
 type ScheduledTransport = {
   beforeChunk?: () => Promise<void> | void;
+  bufferedBytes?: () => number;
   complete: (totalBytes: number) => Promise<void> | void;
   endFile: (file: FileManifestItem, bytes: number, digest: string) => Promise<void> | void;
   sendChunk: (chunk: ScheduledChunk) => Promise<number>;
@@ -68,17 +67,16 @@ type SendScheduledTransferOptions = {
   shouldPause?: (progress: ResumeProgress) => boolean;
   transport: ScheduledTransport;
 };
-
-function normalizeSchedulerOptions(options?: Partial<TransferSchedulerOptions>) {
+function normalizeSchedulerOptions(
+  mode: "direct" | "relay",
+  options?: Partial<TransferSchedulerOptions>,
+) {
   return {
     maxActiveFiles: Math.max(
       1,
       Math.floor(options?.maxActiveFiles ?? DEFAULT_TRANSFER_SCHEDULER.maxActiveFiles),
     ),
-    maxInFlightBytes: Math.max(
-      MANIFEST_CHUNK_BYTES,
-      Math.floor(options?.maxInFlightBytes ?? DEFAULT_TRANSFER_SCHEDULER.maxInFlightBytes),
-    ),
+    flowControl: options?.flowControl ?? new TransferFlowController(mode),
   } satisfies TransferSchedulerOptions;
 }
 
@@ -176,13 +174,18 @@ export function markProgressFiles(
 }
 
 export async function sendScheduledTransfer(files: File[], options: SendScheduledTransferOptions) {
-  const scheduler = normalizeSchedulerOptions(options.scheduler);
+  const scheduler = normalizeSchedulerOptions(options.mode, options.scheduler);
   const activeFiles: ScheduledFile[] = [];
   const activeFileIds = new Set<string>();
   const inFlight = new Set<Promise<void>>();
   let nextFileIndex = 0;
   let cursor = 0;
   let inFlightBytes = 0;
+  const startedAt = performance.now();
+  const initialCommittedBytes = completedBytesFor(options.progress);
+  const commitRttMs: number[] = [];
+  let peakInFlightBytes = 0;
+  let peakTransportBufferedBytes = 0;
 
   const assertActive = () => {
     if (!options.shouldContinue()) throw new Error("Transfer restarted.");
@@ -304,13 +307,22 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
     chunkBytes: ArrayBuffer,
     chunkOffset: number,
     commit: Promise<number>,
+    commitStartedAt: number,
   ) => {
     const chunkLength = chunkBytes.byteLength;
     const expectedCommittedBytes = chunkOffset + chunkLength;
     inFlightBytes += chunkLength;
     file.inFlightBytes += chunkLength;
+    peakInFlightBytes = Math.max(peakInFlightBytes, inFlightBytes);
+    peakTransportBufferedBytes = Math.max(
+      peakTransportBufferedBytes,
+      options.transport.bufferedBytes?.() ?? 0,
+    );
     const tracked = commit
       .then(async (committedBytes) => {
+        const commitRtt = Math.max(0, performance.now() - commitStartedAt);
+        if (commitRttMs.length === 256) commitRttMs.shift();
+        commitRttMs.push(commitRtt);
         if (committedBytes !== expectedCommittedBytes) {
           throw new Error("Receiver committed an unexpected chunk offset.");
         }
@@ -381,7 +393,7 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
       }
 
       const nextChunkBytes = Math.min(MANIFEST_CHUNK_BYTES, file.file.size - file.sentOffset);
-      if (inFlightBytes + nextChunkBytes > scheduler.maxInFlightBytes) {
+      if (inFlightBytes + nextChunkBytes > scheduler.flowControl.currentMaxInFlightBytes()) {
         break;
       }
 
@@ -393,18 +405,15 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
       const chunkIndex = Math.floor(offset / MANIFEST_CHUNK_BYTES);
       const chunkDigest = await sha256Hex(bytes);
       file.sentOffset = offset + bytes.byteLength;
-      trackCommit(
-        file,
-        bytes,
+      const commitStartedAt = performance.now();
+      const commit = options.transport.sendChunk({
+        file: file.manifestItem,
+        chunkIndex,
         offset,
-        options.transport.sendChunk({
-          file: file.manifestItem,
-          chunkIndex,
-          offset,
-          bytes,
-          chunkDigest,
-        }),
-      );
+        bytes,
+        chunkDigest,
+      });
+      trackCommit(file, bytes, offset, commit, commitStartedAt);
       madeProgress = true;
       sentThisPass += 1;
 
@@ -460,4 +469,15 @@ export async function sendScheduledTransfer(files: File[], options: SendSchedule
   }
   assertActive();
   await options.transport.complete(options.plan.totalBytes);
+  const elapsedMs = Math.max(0, performance.now() - startedAt);
+  const usefulBytes = completedBytesFor(options.progress) - initialCommittedBytes;
+  options.recordEvent?.({
+    type: `${options.mode}-telemetry`,
+    usefulBytes,
+    elapsedMs,
+    usefulBytesPerSecond: elapsedMs > 0 ? (usefulBytes * 1_000) / elapsedMs : 0,
+    commitRttMs,
+    peakInFlightBytes,
+    peakTransportBufferedBytes,
+  });
 }

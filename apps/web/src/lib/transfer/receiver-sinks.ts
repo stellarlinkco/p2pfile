@@ -1,183 +1,169 @@
-import { type FileManifestItem, MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
-import type { Sha256Digest } from "./digest";
+import type { FileManifestItem } from "@p2pfile/shared";
+import { createSha256Digest, type Sha256Digest } from "./digest";
+import { type LargeFileSinkBackend, OpfsWorkerClient } from "./receiver-opfs-client";
 import type { ReceivedFile } from "./types";
 
 const SMALL_FILE_BLOB_LIMIT = 1024 * 1024;
-const SINK_READ_CHUNK_BYTES = MANIFEST_CHUNK_BYTES;
-// Close/reopen every N chunks so mid-file reload can re-read durable bytes
-// without paying open+close cost on every 64 KiB write (~20-30 KB/s in Chromium).
-// 2 chunks = 128 KiB balances resume granularity and write amplification.
-const OPFS_CHECKPOINT_CHUNKS = 2;
+
+export type FinalizedReceiverSink = {
+  digest: string;
+  file: ReceivedFile;
+};
 
 export type ReceiverSink = {
   readonly committedBytes: number;
-  /** Bytes guaranteed durable across reload (OPFS closed checkpoints). */
+  /** Bytes guaranteed durable across reload (OPFS flushed checkpoints). */
   readonly durableBytes: number;
-  write: (offset: number, bytes: ArrayBuffer, file: FileManifestItem) => Promise<void>;
-  updateDigest: (
-    offset: number,
-    length: number,
-    file: FileManifestItem,
-    digest: Sha256Digest,
-  ) => Promise<number>;
-  finalize: (file: FileManifestItem) => Promise<ReceivedFile>;
+  write: (chunkIndex: number, offset: number, bytes: ArrayBuffer) => Promise<void>;
+  restore: (durableBytes: number) => Promise<number>;
+  finalize: () => Promise<FinalizedReceiverSink>;
   reset: () => void;
 };
 
 class MemoryBlobSink implements ReceiverSink {
   private readonly chunks = new Map<number, ArrayBuffer>();
+  private digest: Sha256Digest = createSha256Digest();
   committedBytes = 0;
+
+  constructor(
+    private readonly file: FileManifestItem,
+    private readonly onDurableProgress?: (durableBytes: number) => void,
+  ) {}
+
   get durableBytes() {
     return this.committedBytes;
   }
 
-  async write(offset: number, bytes: ArrayBuffer) {
-    this.chunks.set(offset, bytes.slice(0));
+  async write(_chunkIndex: number, offset: number, bytes: ArrayBuffer) {
+    this.chunks.set(offset, bytes);
+    this.digest.update(bytes);
     this.committedBytes = offset + bytes.byteLength;
+    this.onDurableProgress?.(this.committedBytes);
   }
 
-  async read(offset: number, length: number) {
-    const chunks = [...this.chunks.entries()].sort(([left], [right]) => left - right);
-    const result = new Uint8Array(length);
-    let copied = 0;
-    for (const [chunkOffset, bytes] of chunks) {
-      if (copied >= length) break;
-      if (chunkOffset + bytes.byteLength <= offset) continue;
-      if (chunkOffset > offset + copied) break;
-      const start = Math.max(0, offset + copied - chunkOffset);
-      const available = Math.min(bytes.byteLength - start, length - copied);
-      result.set(new Uint8Array(bytes, start, available), copied);
-      copied += available;
-    }
-    return copied === length ? result.buffer : new ArrayBuffer(0);
-  }
-  async updateDigest(
-    offset: number,
-    length: number,
-    _file: FileManifestItem,
-    digest: Sha256Digest,
-  ) {
+  async restore(durableBytes: number) {
+    this.digest = createSha256Digest();
     let readBytes = 0;
-    while (readBytes < length) {
-      const chunkLength = Math.min(SINK_READ_CHUNK_BYTES, length - readBytes);
-      const bytes = await this.read(offset + readBytes, chunkLength);
-      if (bytes.byteLength === 0) break;
-      digest.update(bytes);
-      readBytes += bytes.byteLength;
-      if (bytes.byteLength < chunkLength) break;
+    for (const [offset, bytes] of [...this.chunks.entries()].sort(
+      ([left], [right]) => left - right,
+    )) {
+      if (offset !== readBytes || readBytes >= durableBytes) break;
+      const length = Math.min(bytes.byteLength, durableBytes - readBytes);
+      this.digest.update(new Uint8Array(bytes, 0, length));
+      readBytes += length;
     }
+    this.committedBytes = readBytes;
+    if (this.committedBytes > 0) this.onDurableProgress?.(this.committedBytes);
     return readBytes;
   }
 
-  async finalize(file: FileManifestItem) {
+  async finalize() {
     const chunks = [...this.chunks.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, bytes]) => bytes);
-    const blob = new Blob(chunks, { type: file.mimeType });
-    return { id: file.id, name: file.name, size: file.size, blob, url: URL.createObjectURL(blob) };
+    const blob = new Blob(chunks, { type: this.file.mimeType });
+    return {
+      digest: this.digest.digestHex(),
+      file: {
+        id: this.file.id,
+        name: this.file.name,
+        size: this.file.size,
+        blob,
+        url: URL.createObjectURL(blob),
+      },
+    };
   }
 
   reset() {
     this.chunks.clear();
+    this.digest = createSha256Digest();
     this.committedBytes = 0;
   }
 }
 
 class OpfsSink implements ReceiverSink {
-  private filePromise: Promise<FileSystemFileHandle> | null = null;
-  private writable: FileSystemWritableFileStream | null = null;
-  private writableFileId: string | null = null;
-  private chunksSinceCheckpoint = 0;
-  committedBytes = 0;
-  durableBytes = 0;
+  private readonly backend: LargeFileSinkBackend;
+  private lastReportedDurableBytes = 0;
 
-  constructor(private readonly sessionId: string) {}
-
-  private file(file: FileManifestItem) {
-    this.filePromise ??= navigator.storage.getDirectory().then((root) =>
-      root.getFileHandle(`p2pfile-${this.sessionId}-${file.id}-${file.size}.part`, {
-        create: true,
-      }),
-    );
-    return this.filePromise;
+  constructor(
+    sessionId: string,
+    file: FileManifestItem,
+    private readonly onDurableProgress?: (durableBytes: number) => void,
+    private readonly onFailure?: (error: Error) => void,
+  ) {
+    this.backend = largeFileSinkFactory
+      ? largeFileSinkFactory(sessionId, file)
+      : new OpfsWorkerClient(
+          sessionId,
+          file,
+          undefined,
+          this.reportDurableProgress,
+          this.onFailure,
+        );
   }
 
-  private async closeWritable() {
-    if (!this.writable) return;
-    const writable = this.writable;
-    const durableAtClose = this.committedBytes;
-    this.writable = null;
-    this.writableFileId = null;
-    this.chunksSinceCheckpoint = 0;
-    await writable.close();
-    this.durableBytes = durableAtClose;
+  get committedBytes() {
+    return this.backend.committedBytes;
   }
 
-  private async ensureWritable(file: FileManifestItem) {
-    if (this.writable && this.writableFileId === file.id) {
-      return this.writable;
-    }
-    await this.closeWritable();
-    const handle = await this.file(file);
-    // keepExistingData preserves earlier checkpoints when reopening after close.
-    this.writable = await handle.createWritable({ keepExistingData: true });
-    this.writableFileId = file.id;
-    this.chunksSinceCheckpoint = 0;
-    return this.writable;
+  get durableBytes() {
+    return this.backend.durableBytes;
   }
 
-  async write(offset: number, bytes: ArrayBuffer, file: FileManifestItem) {
-    const writable = await this.ensureWritable(file);
-    await writable.write({ type: "write", position: offset, data: bytes });
-    this.committedBytes = offset + bytes.byteLength;
-    this.chunksSinceCheckpoint += 1;
-    // Checkpoint on a multi-chunk cadence (and at EOF) so reload resume still works.
-    if (this.chunksSinceCheckpoint >= OPFS_CHECKPOINT_CHUNKS || this.committedBytes >= file.size) {
-      await this.closeWritable();
-    }
+  async write(chunkIndex: number, offset: number, bytes: ArrayBuffer) {
+    await this.backend.write(chunkIndex, offset, bytes);
+    this.reportDurableProgress(this.backend.durableBytes);
   }
 
-  async updateDigest(offset: number, length: number, file: FileManifestItem, digest: Sha256Digest) {
-    // Must close first: unclosed OPFS writes are not visible via getFile().
-    await this.closeWritable();
-    const blob = await (await this.file(file)).getFile();
-    let readBytes = 0;
-    while (readBytes < length) {
-      const chunkLength = Math.min(SINK_READ_CHUNK_BYTES, length - readBytes);
-      const bytes = await blob
-        .slice(offset + readBytes, offset + readBytes + chunkLength)
-        .arrayBuffer();
-      if (bytes.byteLength === 0) break;
-      digest.update(bytes);
-      readBytes += bytes.byteLength;
-      if (bytes.byteLength < chunkLength) break;
-    }
-    // Resume starts from already-durable OPFS bytes.
-    this.committedBytes = Math.max(this.committedBytes, offset + readBytes);
-    this.durableBytes = Math.max(this.durableBytes, offset + readBytes);
-    return readBytes;
+  async restore(durableBytes: number) {
+    const restoredBytes = await this.backend.restore(durableBytes);
+    this.reportDurableProgress(this.backend.durableBytes);
+    return restoredBytes;
   }
 
-  async finalize(file: FileManifestItem) {
-    await this.closeWritable();
-    const blob = await (await this.file(file)).getFile();
-    return { id: file.id, name: file.name, size: file.size, blob, url: URL.createObjectURL(blob) };
+  async finalize() {
+    const finalized = await this.backend.finalize();
+    this.reportDurableProgress(this.backend.durableBytes);
+    return finalized;
   }
 
   reset() {
-    void this.closeWritable();
-    this.committedBytes = 0;
-    this.durableBytes = 0;
-    this.filePromise = null;
+    this.backend.reset();
   }
+
+  private readonly reportDurableProgress = (durableBytes: number) => {
+    if (durableBytes <= this.lastReportedDurableBytes) return;
+    this.lastReportedDurableBytes = durableBytes;
+    this.onDurableProgress?.(durableBytes);
+  };
+}
+
+type LargeFileSinkFactory = (sessionId: string, file: FileManifestItem) => LargeFileSinkBackend;
+
+let largeFileSinkFactory: LargeFileSinkFactory | null = null;
+
+export function setLargeFileSinkFactoryForTests(factory: LargeFileSinkFactory | null) {
+  largeFileSinkFactory = factory;
 }
 
 function canUseOpfs() {
-  return typeof navigator !== "undefined" && typeof navigator.storage?.getDirectory === "function";
+  return (
+    largeFileSinkFactory !== null ||
+    (typeof navigator !== "undefined" &&
+      typeof navigator.storage?.getDirectory === "function" &&
+      typeof Worker === "function")
+  );
 }
 
-export function createReceiverSink(file: FileManifestItem, sessionId: string): ReceiverSink {
-  if (file.size <= SMALL_FILE_BLOB_LIMIT) return new MemoryBlobSink();
-  if (canUseOpfs()) return new OpfsSink(sessionId);
+export function createReceiverSink(
+  file: FileManifestItem,
+  sessionId: string,
+  onDurableProgress?: (durableBytes: number) => void,
+  onFailure?: (error: Error) => void,
+): ReceiverSink {
+  if (file.size <= SMALL_FILE_BLOB_LIMIT) {
+    return new MemoryBlobSink(file, onDurableProgress);
+  }
+  if (canUseOpfs()) return new OpfsSink(sessionId, file, onDurableProgress, onFailure);
   throw new Error("Large-file receiver storage unavailable.");
 }

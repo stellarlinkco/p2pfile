@@ -139,8 +139,8 @@ function activeProgressEntries(
     if (
       file.size > ACTIVE_PROGRESS_MIN_BYTES &&
       committedBytes > 0 &&
-      committedBytes < file.size &&
-      committedBytes % MANIFEST_CHUNK_BYTES === 0
+      committedBytes <= file.size &&
+      (committedBytes === file.size || committedBytes % MANIFEST_CHUNK_BYTES === 0)
     ) {
       entries.push({ fileId: file.id, committedBytes });
     }

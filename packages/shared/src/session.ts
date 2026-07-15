@@ -12,6 +12,18 @@ export const SessionAccessCodeSchema = z
 export const SessionTokenSchema = z.string().min(16);
 export const SharePathSchema = z.string().startsWith("/");
 
+export function matchesSessionToken(
+  expected: string | null | undefined,
+  candidate: string | null | undefined,
+) {
+  if (!expected || !candidate || expected.length !== candidate.length) return false;
+  let mismatch = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    mismatch |= expected.charCodeAt(index) ^ candidate.charCodeAt(index);
+  }
+  return mismatch === 0;
+}
+
 export const TransferModeSchema = z.enum(["direct", "relay"]);
 export const SessionRoleSchema = z.enum(["sender", "receiver"]);
 export const SessionStateSchema = z.enum([
@@ -62,13 +74,11 @@ export const ResumeProgressSchema = z
           message: "Committed bytes must not exceed file size.",
         });
       }
-      if (
-        file.completed !== (file.committedBytes === file.size && (file.size > 0 || file.completed))
-      ) {
+      if (file.completed && file.committedBytes !== file.size) {
         context.addIssue({
           code: "custom",
           path: ["files", index, "completed"],
-          message: "Completed must match committed bytes.",
+          message: "Completed files must have all bytes committed.",
         });
       }
       if (file.committedBytes !== file.size && file.committedBytes % file.chunkSize !== 0) {

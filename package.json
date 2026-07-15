@@ -16,6 +16,7 @@
     "dev:signal": "bun run --filter @p2pfile/signal dev",
     "dev:edge": "bun run --filter @p2pfile/edge dev",
     "dev:cloudflare": "bun run --filter @p2pfile/web build && bun run --filter @p2pfile/edge dev -- --port 8788",
+    "benchmark:wan": "bun run scripts/wan-transfer-benchmark.ts",
     "deploy:cloudflare": "bun run --filter @p2pfile/web build && bun run --filter @p2pfile/edge deploy",
     "lint": "bun run guard:names && bun run guard:structure && biome check .",
     "format": "biome format --write .",

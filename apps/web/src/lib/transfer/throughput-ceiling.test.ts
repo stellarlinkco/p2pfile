@@ -43,6 +43,10 @@ function formatKbps(bytesPerSecond: number) {
   return bytesPerSecond / 1024;
 }
 
+function fixedFlow(maxInFlightBytes: number) {
+  return { currentMaxInFlightBytes: () => maxInFlightBytes };
+}
+
 async function measureDirectThroughput(options: {
   fileBytes: number;
   commitDelayMs: number;
@@ -112,7 +116,7 @@ async function measureDirectThroughput(options: {
     () => true,
     undefined,
     options.maxInFlightBytes
-      ? { maxInFlightBytes: options.maxInFlightBytes, maxActiveFiles: 1 }
+      ? { flowControl: fixedFlow(options.maxInFlightBytes), maxActiveFiles: 1 }
       : { maxActiveFiles: 1 },
   );
   const elapsedMs = performance.now() - started;
@@ -192,7 +196,7 @@ async function measureRelayThroughput(options: {
       () => true,
       undefined,
       options.maxInFlightBytes
-        ? { maxInFlightBytes: options.maxInFlightBytes, maxActiveFiles: 1 }
+        ? { flowControl: fixedFlow(options.maxInFlightBytes), maxActiveFiles: 1 }
         : { maxActiveFiles: 1 },
     );
     const elapsedMs = performance.now() - started;
@@ -272,6 +276,39 @@ test("default relay window remains bounded under delayed commits", async () => {
   expect(result.peakInFlight).toBe(8);
   expect(formatKbps(result.bytesPerSecond)).toBeGreaterThan(400);
 });
+test("Direct and Relay expose bounded commit, delivery, retry, and byte telemetry", async () => {
+  const target = globalThis as {
+    __P2PFILE_TEST_TRANSFER_EVENTS__?: Record<string, unknown>[];
+  };
+  target.__P2PFILE_TEST_TRANSFER_EVENTS__ = [];
+  try {
+    await measureDirectThroughput({
+      fileBytes: MANIFEST_CHUNK_BYTES * 2,
+      commitDelayMs: 5,
+      maxInFlightBytes: MANIFEST_CHUNK_BYTES * 2,
+    });
+    await measureRelayThroughput({
+      fileBytes: MANIFEST_CHUNK_BYTES * 2,
+      commitDelayMs: 5,
+      maxInFlightBytes: MANIFEST_CHUNK_BYTES * 2,
+    });
+
+    const events = target.__P2PFILE_TEST_TRANSFER_EVENTS__;
+    const direct = events.find((event) => event.type === "direct-telemetry");
+    const relayCommit = events.find((event) => event.type === "relay-telemetry");
+    const relayDelivery = events.find((event) => event.type === "relay-delivery-telemetry");
+    expect(direct?.commitRttMs as number[]).toHaveLength(2);
+    expect(direct?.peakInFlightBytes).toBe(MANIFEST_CHUNK_BYTES * 2);
+    expect(Number(direct?.usefulBytesPerSecond)).toBeGreaterThan(0);
+    expect(relayCommit?.commitRttMs as number[]).toHaveLength(2);
+    expect(Array.isArray(relayDelivery?.deliveryAckRttMs)).toBe(true);
+    expect(Number(relayDelivery?.peakPendingWireBytes)).toBeGreaterThan(0);
+    expect(Number(relayDelivery?.wireByteAmplification)).toBeGreaterThanOrEqual(1);
+  } finally {
+    delete target.__P2PFILE_TEST_TRANSFER_EVENTS__;
+  }
+});
+
 test("hand-rolled base64 encode of one chunk is a measurable main-thread tax", () => {
   const bytes = makeBytes(MANIFEST_CHUNK_BYTES, 3).buffer;
   const rounds = 20;

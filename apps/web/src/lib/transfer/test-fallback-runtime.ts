@@ -1,10 +1,11 @@
-import {
-  type FileManifestItem,
-  type ResumeProgress,
-  resumeProgressFromManifest,
-} from "@p2pfile/shared";
+import type { FileManifestItem, ResumeProgress } from "@p2pfile/shared";
 import { createSha256Digest } from "./digest";
-import { applyMode, buildReceiverState, handleProtocolMessage } from "./runtime-shared";
+import {
+  applyMode,
+  buildReceiverState,
+  handleProtocolMessage,
+  receiverResumeProgress,
+} from "./runtime-shared";
 import {
   buildTransferPlan,
   initialResumeProgress,
@@ -271,7 +272,12 @@ export async function startReceiverTestFallbackRuntime(
   for (const file of receivedFiles) {
     seededCommittedBytes.set(file.id, file.size);
   }
-  const state = buildReceiverState(expected, seededCommittedBytes, sessionId);
+  const state = buildReceiverState(
+    expected,
+    seededCommittedBytes,
+    sessionId,
+    new Set(receivedFiles.map((file) => file.id)),
+  );
   let stopped = false;
   let completed = false;
   if (seededCommittedBytes.size > 0) {
@@ -331,7 +337,7 @@ export async function startReceiverTestFallbackRuntime(
   channel.postMessage({
     type: "receiver-ready",
     payload: {
-      progress: resumeProgressFromManifest(expected, seededCommittedBytes),
+      progress: receiverResumeProgress(state),
       completedFiles: state.receivedFiles,
     },
   });

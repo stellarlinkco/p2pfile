@@ -16,7 +16,7 @@ import type {
 } from "./types";
 
 // Allow a multi-chunk pipeline before applying send-side SCTP backpressure.
-// Commit-window backpressure (maxInFlightBytes) remains the primary control.
+// The flow controller's commit window remains the primary backpressure boundary.
 const DATA_CHANNEL_HIGH_WATER_BYTES = MANIFEST_CHUNK_BYTES * 16;
 
 function configuredTurnUrl() {
@@ -58,7 +58,12 @@ declare global {
   }
 }
 
-export { buildReceiverState, handleProtocolMessage } from "./receiver-protocol";
+export {
+  buildReceiverState,
+  disposeReceiverState,
+  handleProtocolMessage,
+  receiverResumeProgress,
+} from "./receiver-protocol";
 
 export function relayAvailable() {
   return true;
@@ -125,14 +130,11 @@ export async function awaitBufferedAmount(channel: RTCDataChannel) {
     return;
   }
 
-  // Adaptive threshold inspired by FastSend: keep ~16 chunks buffered when
-  // the window is still large, otherwise drain fully.
-  channel.bufferedAmountLowThreshold = Math.min(
-    Math.floor(DATA_CHANNEL_HIGH_WATER_BYTES / 2),
-    MANIFEST_CHUNK_BYTES * 16,
-  );
+  // Resume sending after the fixed DataChannel buffer drains below half its cap.
+  channel.bufferedAmountLowThreshold = DATA_CHANNEL_HIGH_WATER_BYTES / 2;
+  const lowWaterBytes = channel.bufferedAmountLowThreshold;
 
-  while (channel.readyState === "open" && channel.bufferedAmount >= DATA_CHANNEL_HIGH_WATER_BYTES) {
+  while (channel.readyState === "open" && channel.bufferedAmount > lowWaterBytes) {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       const settle = (action: () => void) => {
@@ -151,7 +153,7 @@ export async function awaitBufferedAmount(channel: RTCDataChannel) {
 
       channel.addEventListener("bufferedamountlow", onBufferedAmountLow, { once: true });
       channel.addEventListener("close", onClose, { once: true });
-      if (channel.bufferedAmount < DATA_CHANNEL_HIGH_WATER_BYTES) {
+      if (channel.bufferedAmount <= lowWaterBytes) {
         settle(() => resolve());
       }
     });

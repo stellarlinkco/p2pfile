@@ -1,4 +1,4 @@
-import { ClaimSessionResponseSchema } from "@p2pfile/shared";
+import { ClaimSessionResponseSchema, matchesSessionToken } from "@p2pfile/shared";
 import type { StoredSession } from "./session-model";
 import { toPublicSession } from "./session-view";
 
@@ -15,7 +15,9 @@ export function terminalClaimResponse(session: StoredSession, receiverToken?: st
   if (session.state === "completed-view") {
     return ClaimSessionResponseSchema.parse({
       status: "completed",
-      originalReceiver: Boolean(receiverToken && receiverToken === session.receiverToken),
+      originalReceiver: Boolean(
+        receiverToken && matchesSessionToken(session.receiverToken, receiverToken),
+      ),
       session: toPublicSession(session),
     });
   }

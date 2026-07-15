@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
+import { MANIFEST_CHUNK_BYTES, manifestHash } from "@p2pfile/shared";
 import { decodeBinaryRelayChunkFrame } from "./relay-runtime";
 import { shouldReuseDirectAttempt, startSenderRuntime } from "./sender-runtime";
 import type { BrowserSignalMessage, SenderRuntimeHandlers } from "./types";
@@ -286,6 +286,66 @@ async function withSenderHarness(
     }
   }
 }
+
+test("receiver completion projects final progress and rejects later receiver resets", async () => {
+  await withSenderHarness(undefined, async ({ handlers, socket, settle }) => {
+    const manifest = [
+      { id: "file-1", name: "one.bin", size: 10, mimeType: "application/octet-stream" },
+      { id: "file-2", name: "two.bin", size: 20, mimeType: "application/octet-stream" },
+    ];
+    const progress: Parameters<SenderRuntimeHandlers["onProgress"]>[0][] = [];
+    let completions = 0;
+    handlers.onProgress = (nextProgress) => progress.push(nextProgress);
+    handlers.onComplete = () => {
+      completions += 1;
+    };
+    const runtime = await startSenderRuntime(
+      "session-complete",
+      "sender-token",
+      [],
+      manifest,
+      handlers,
+    );
+
+    socket().receive({ type: "transfer-complete", payload: { completedAt: Date.now() } });
+    await settle();
+
+    expect(completions).toBe(1);
+    expect(progress.at(-1)).toMatchObject({
+      completedBytes: 30,
+      totalBytes: 30,
+      completedFiles: 2,
+      totalFiles: 2,
+      files: [
+        { fileId: "file-1", fileBytes: 10, state: "completed" },
+        { fileId: "file-2", fileBytes: 20, state: "completed" },
+      ],
+    });
+    const progressCountAfterCompletion = progress.length;
+
+    socket().receive({
+      type: "receiver-ready",
+      payload: {
+        progress: {
+          manifestHash: manifestHash(manifest),
+          files: manifest.map((file) => ({
+            fileId: file.id,
+            size: file.size,
+            chunkSize: MANIFEST_CHUNK_BYTES,
+            committedBytes: 0,
+            completed: false,
+          })),
+        },
+        receiverInstanceId: "receiver-after-completion",
+      },
+    });
+    await settle();
+
+    expect(completions).toBe(1);
+    expect(progress).toHaveLength(progressCountAfterCompletion);
+    runtime.stop();
+  });
+});
 
 test("direct ICE failure with TURN configured renegotiates via a relay-only attempt before ws relay", async () => {
   await withSenderHarness(

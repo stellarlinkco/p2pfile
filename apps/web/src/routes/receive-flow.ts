@@ -9,6 +9,7 @@ import type {
   TransferProgress,
   TransportDiagnostics,
 } from "../lib/transfer";
+import { TransferRateSampler } from "../lib/transfer/transfer-rate-sampler";
 import { claimReceiverSession } from "./receive-flow-claim";
 import {
   clearReceivedFiles,
@@ -43,8 +44,9 @@ export function useReceiveFlow(): ReceiveFlowState {
   const [retriesRemaining, setRetriesRemaining] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const runtimeRef = useRef<ReceiverRuntime | null>(null);
-  const sampleRef = useRef<{ bytes: number; at: number } | null>(null);
+  const speedSampler = useMemo(() => new TransferRateSampler(), []);
   const receivedFilesRef = useRef<ReceivedFile[]>([]);
+  const progressBytesRef = useRef(0);
   const previousSessionIdRef = useRef<string | null>(null);
   const sessionLoadRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
 
@@ -89,6 +91,9 @@ export function useReceiveFlow(): ReceiveFlowState {
     receivedFilesRef.current = receivedFiles;
   }, [receivedFiles]);
   useEffect(() => {
+    progressBytesRef.current = progress.completedBytes;
+  }, [progress.completedBytes]);
+  useEffect(() => {
     return () => {
       stopReceiverRuntime(runtimeRef);
       revokeReceivedFiles(receivedFilesRef.current);
@@ -105,6 +110,15 @@ export function useReceiveFlow(): ReceiveFlowState {
     }
     previousSessionIdRef.current = nextSessionId;
   }, [session]);
+
+  useEffect(() => {
+    if (stage !== "receiving") return;
+    const timer = setInterval(() => {
+      const nextSpeed = speedSampler.sample(progressBytesRef.current);
+      if (nextSpeed !== undefined) setSpeed(nextSpeed);
+    }, 250);
+    return () => clearInterval(timer);
+  }, [speedSampler, stage]);
 
   useSenderEndedPolling({
     session,
@@ -146,7 +160,8 @@ export function useReceiveFlow(): ReceiveFlowState {
       session,
       currentReceiverToken: session ? readReceiverToken(session.sessionId) : null,
       runtimeRef,
-      sampleRef,
+      speedSampler,
+      progressBytesRef,
       receivedFilesRef,
       setSession,
       setStage,

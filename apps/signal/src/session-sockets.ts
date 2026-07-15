@@ -1,4 +1,4 @@
-import type { SessionRole, SignalEnvelope } from "@p2pfile/shared";
+import { matchesSessionToken, type SessionRole, type SignalEnvelope } from "@p2pfile/shared";
 import type { StoredSession } from "./session-model";
 
 export const sendToPeer = (
@@ -25,8 +25,8 @@ export const detachSocket = (session: StoredSession, role: SessionRole) => {
 
 export const isValidRoleToken = (session: StoredSession, role: SessionRole, token: string) => {
   if (role === "sender") {
-    return session.senderToken === token;
+    return matchesSessionToken(session.senderToken, token);
   }
 
-  return session.receiverToken !== null && session.receiverToken === token;
+  return session.receiverToken !== null && matchesSessionToken(session.receiverToken, token);
 };

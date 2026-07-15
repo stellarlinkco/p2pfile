@@ -685,18 +685,15 @@ test("relay transfer advances resumable sender cursor only after receiver chunk-
   const relayMessages: RelayProtocolMessage[] = [];
   const progressSnapshots: ResumeProgress[] = [];
   let firstChunkSequence: number | null = null;
-  const queue = new RelayMessageQueue(
-    (data) => {
-      handleRelayWire(data, (message, sequence) => {
-        relayMessages.push(message);
-        queue.acknowledge(sequence);
-        if (message.type === "chunk") {
-          firstChunkSequence = sequence;
-        }
-      });
-    },
-    { resendMs: 1 },
-  );
+  const queue = new RelayMessageQueue((data) => {
+    handleRelayWire(data, (message, sequence) => {
+      relayMessages.push(message);
+      queue.acknowledge(sequence);
+      if (message.type === "chunk") {
+        firstChunkSequence = sequence;
+      }
+    });
+  });
   const file = new File([makeBytes(MANIFEST_CHUNK_BYTES, 11)], "large.zip", {
     type: "application/zip",
   });
