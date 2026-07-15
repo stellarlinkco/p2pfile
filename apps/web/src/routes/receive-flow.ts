@@ -46,6 +46,7 @@ export function useReceiveFlow(): ReceiveFlowState {
   const sampleRef = useRef<{ bytes: number; at: number } | null>(null);
   const receivedFilesRef = useRef<ReceivedFile[]>([]);
   const previousSessionIdRef = useRef<string | null>(null);
+  const sessionLoadRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
 
   const initialSessionId = useMemo(
     () => routeSessionId ?? searchParams.get("session"),
@@ -53,8 +54,12 @@ export function useReceiveFlow(): ReceiveFlowState {
   );
 
   const loadSession = useCallback(
-    async (sessionId: string, canonicalizeRoute: boolean) => {
-      await loadReceiverSession(sessionId, canonicalizeRoute, {
+    (sessionId: string, canonicalizeRoute: boolean) => {
+      const key = `${sessionId}:${canonicalizeRoute}`;
+      const pending = sessionLoadRef.current;
+      if (pending?.key === key) return pending.promise;
+
+      const promise = loadReceiverSession(sessionId, canonicalizeRoute, {
         navigate,
         setSession,
         setProgress,
@@ -64,7 +69,11 @@ export function useReceiveFlow(): ReceiveFlowState {
         setError,
         setRetriesRemaining,
         setReceivedFiles,
+      }).finally(() => {
+        if (sessionLoadRef.current?.promise === promise) sessionLoadRef.current = null;
       });
+      sessionLoadRef.current = { key, promise };
+      return promise;
     },
     [navigate],
   );

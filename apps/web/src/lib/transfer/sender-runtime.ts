@@ -377,8 +377,16 @@ export async function startSenderRuntime(
       stopRelayMode: () => fallback.stopRelayMode(),
       markCompleted,
     });
-    signalSocket.addEventListener("close", () => {
+    signalSocket.addEventListener("close", (event) => {
       if (stopped || completed || signalSocket !== ws) return;
+      if (event.reason === "replaced") {
+        stopped = true;
+        transferring = false;
+        fallback.stopRelayMode();
+        queue.stop();
+        closeDirectTransport();
+        return;
+      }
       // Transient signal drops reattach; peer loss surfaces via relay-nack / ack timeout.
       reattachSignalSocket();
     });

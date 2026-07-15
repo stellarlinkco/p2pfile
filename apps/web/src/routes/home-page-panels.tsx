@@ -19,20 +19,20 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
   const stageLabel = SENDER_STAGE_LABELS[sender.stage];
 
   return (
-    <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+    <section className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm sm:p-5">
       <div className="mb-4 flex items-start justify-between gap-3 sm:items-center">
         <div>
-          <h1 className="font-bold text-2xl tracking-tight">发送文件</h1>
-          <p className="mt-1 text-neutral-500 text-sm">选中文件后创建会话。</p>
+          <p className="text-neutral-500 text-sm">发送文件</p>
+          <h1 className="mt-1 font-bold text-2xl tracking-tight">创建传输</h1>
         </div>
-        <span className="font-semibold text-teal-700 text-sm">{stageLabel}</span>
+        <span className="font-semibold text-sm text-teal-700">{stageLabel}</span>
       </div>
-      <label className="grid min-h-24 cursor-pointer gap-4 rounded-xl border border-dashed border-neutral-300 p-4 transition hover:border-teal-600/50 sm:grid-cols-[1fr_auto] sm:p-5">
+      <label className="grid min-h-28 cursor-pointer gap-4 rounded-xl border border-dashed border-neutral-300 p-4 transition-colors hover:border-teal-600/50 sm:grid-cols-[1fr_auto]">
         <span className="flex items-center gap-3 text-neutral-700">
           <span className="text-3xl text-teal-700">▧</span>
           选择一个或多个文件
         </span>
-        <span className="rounded-lg bg-teal-600 px-6 py-3 font-bold text-white shadow-sm">
+        <span className="min-h-11 rounded-lg bg-teal-600 px-5 py-3 text-center font-bold text-white shadow-sm">
           选择文件
         </span>
         <input
@@ -48,7 +48,7 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
         <StatCell label="总大小" value={formatBytes(sender.totalBytes)} />
       </div>
       <button
-        className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-teal-600 px-4 font-bold text-white shadow-sm transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-500"
+        className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-teal-600 px-4 font-bold text-white shadow-sm transition-colors hover:bg-teal-700 active:scale-[0.96] disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-500"
         data-testid="create-session-button"
         disabled={sender.selectedFiles.length === 0 || sender.stage === "creating"}
         onClick={sender.createCurrentSession}
@@ -59,7 +59,7 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
       <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
         {sender.shareState ? (
           <button
-            className="rounded-xl border border-neutral-200 px-3 py-3"
+            className="min-h-11 rounded-lg border border-neutral-200 px-3 py-3 transition-colors hover:bg-neutral-50 active:scale-[0.96]"
             onClick={sender.endCurrentSession}
             type="button"
           >
@@ -67,11 +67,11 @@ export function SenderPanel({ sender }: { sender: SenderFlowState }) {
           </button>
         ) : null}
         <Link
-          className="rounded-xl border border-neutral-200 px-3 py-3 text-center"
+          className="min-h-11 rounded-lg border border-neutral-200 px-3 py-3 text-center transition-colors hover:bg-neutral-50 active:scale-[0.96]"
           data-testid="home-receive-link"
           to="/receive"
         >
-          接收页
+          接收文件
         </Link>
       </div>
       <p className="mt-3 text-neutral-500 text-sm" data-testid="session-status">

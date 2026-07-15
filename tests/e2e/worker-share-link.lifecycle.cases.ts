@@ -111,18 +111,12 @@ test("Worker accidental sender interruption shows recoverable reconnecting guida
       ).__P2PFILE_CLOSE_SENDER_SIGNAL__(),
     );
 
-    const reconnectingNoticeText = await receiver
-      .waitForFunction(
-        () =>
-          document.querySelector('[data-testid="reconnecting-session-notice"]')?.textContent ??
-          false,
-        undefined,
-        { timeout: 15_000 },
-      )
-      .then((handle) => handle.jsonValue() as Promise<string>);
-    expect(reconnectingNoticeText).toContain("Waiting for peer reconnect");
+    await expect(receiver.getByTestId("session-status")).toContainText("发送方已重新连接", {
+      timeout: 15_000,
+    });
+    const receivingStatusText = await receiver.getByTestId("session-status").textContent();
+    await expect(receiver.getByTestId("reconnecting-session-notice")).toHaveCount(0);
     await expect(receiver.getByTestId("ended-session-notice")).toHaveCount(0);
-    const receiverStatus = await receiver.getByTestId("session-status").textContent();
     const screenshotPath = await writeEvidenceScreenshot(receiver, "val-rel-001-reconnecting.png");
     await writeEvidence("val-rel-001-dom-trace.json", {
       assertionId: "VAL-REL-001",
@@ -131,8 +125,8 @@ test("Worker accidental sender interruption shows recoverable reconnecting guida
       shareLink,
       apiRequests,
       websocketRequests: websocketRequests.filter((url) => url.includes("/ws/")),
-      receiverStatus,
-      reconnectingNotice: reconnectingNoticeText,
+      receivingStatus: receivingStatusText,
+      reconnectingNoticeCount: await receiver.getByTestId("reconnecting-session-notice").count(),
       endedNoticeCount: await receiver.getByTestId("ended-session-notice").count(),
       screenshotPath,
     });

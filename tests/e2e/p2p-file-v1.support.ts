@@ -207,7 +207,7 @@ export async function openReceiver(
   if (options.fallback ?? true) {
     await enableTransferFallback(page);
   }
-  await page.goto(shareLink);
+  if (new URL(page.url()).href !== new URL(shareLink).href) await page.goto(shareLink);
 
   const manifest = page.getByTestId("receiver-manifest");
   await expect(manifest).toBeVisible();

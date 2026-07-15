@@ -345,5 +345,11 @@ export async function startReceiverTestFallbackRuntime(
       stopped = true;
       channel.close();
     },
+    isAlive() {
+      return !stopped;
+    },
+    isEstablished() {
+      return !stopped;
+    },
   };
 }

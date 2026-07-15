@@ -24,34 +24,31 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
     flow.stage === "receiving";
 
   return (
-    <div className="mx-auto grid w-full max-w-[1568px] gap-3 px-3 py-3 sm:px-4 xl:grid-cols-[0.9fr_1.1fr]">
-      <section className="grid min-w-0 grid-cols-1 content-start gap-3">
-        <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="mx-auto grid w-full max-w-[1180px] gap-4 px-3 py-4 sm:px-5 sm:py-6 lg:grid-cols-[minmax(0,0.82fr)_minmax(380px,1.18fr)]">
+      <section className="grid min-w-0 content-start gap-3">
+        <section className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm sm:p-5">
+          <div className="mb-4 flex items-center justify-between gap-3">
             <div>
-              <p className="text-neutral-500 text-sm">接收入口</p>
-              <h1 className="mt-1 font-bold text-2xl tracking-tight">接收文件</h1>
+              <p className="text-neutral-500 text-sm">接收文件</p>
+              <h1 className="mt-1 font-bold text-2xl tracking-tight">打开传输</h1>
             </div>
-            <span className="rounded-full bg-teal-50 px-3 py-2 font-medium text-teal-700 text-sm">
+            <span className="rounded-full bg-teal-50 px-3 py-2 font-medium text-sm text-teal-700">
               临时会话
             </span>
           </div>
-          <p className="mb-4 text-neutral-600 text-sm leading-6">
-            粘贴链接或访问码后查看文件清单，再开始接收。
-          </p>
           <label className="font-semibold text-sm" htmlFor="receiver-entry">
-            链接或访问码
+            Share Link 或 Access Code
           </label>
           <input
-            className="mt-2 w-full rounded-lg border border-neutral-200 px-4 py-3 outline-none focus:border-teal-600"
+            className="mt-2 min-h-12 w-full rounded-lg border border-neutral-200 px-4 py-3 outline-none focus:border-teal-600"
             data-testid="receiver-entry-input"
             id="receiver-entry"
             onChange={(event) => flow.setEntryValue(event.target.value)}
-            placeholder="https://…/f/session-id 或访问码"
+            placeholder="粘贴链接或访问码"
             value={flow.entryValue}
           />
           <button
-            className="mt-3 flex min-h-12 w-full items-center justify-center rounded-lg bg-teal-600 font-bold text-white disabled:bg-neutral-200 disabled:text-neutral-500"
+            className="mt-3 flex min-h-12 w-full items-center justify-center rounded-lg bg-teal-600 font-bold text-white transition-colors hover:bg-teal-700 active:scale-[0.96] disabled:bg-neutral-200 disabled:text-neutral-500"
             data-testid="receiver-open-session-button"
             disabled={openEntryDisabled}
             onClick={flow.openEntry}
@@ -64,10 +61,37 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
           </div>
           {flow.error ? <p className="mt-2 text-rose-700 text-sm">{flow.error}</p> : null}
         </section>
+        {flow.stage === "manifest" || flow.stage === "failed" || flow.stage === "reconnecting" ? (
+          <section className="grid gap-2">
+            <button
+              className="min-h-12 w-full rounded-lg bg-teal-600 px-4 font-bold text-white transition-colors hover:bg-teal-700 active:scale-[0.96] disabled:bg-neutral-200 disabled:text-neutral-500"
+              data-testid="claim-session-button"
+              disabled={!flow.session}
+              onClick={flow.claimCurrentSession}
+              type="button"
+            >
+              接收全部文件
+            </button>
+            {flow.retriesRemaining !== null ? (
+              <p className="text-neutral-600 text-sm" data-testid="retry-budget-remaining">
+                还可重试 {flow.retriesRemaining} 次，用尽后需重新创建会话。
+              </p>
+            ) : null}
+          </section>
+        ) : null}
+        {flow.stage === "claiming" || flow.stage === "connecting" || flow.stage === "receiving" ? (
+          <button
+            className="min-h-12 w-full rounded-lg border border-neutral-200 px-4 font-medium transition-colors hover:bg-neutral-50 active:scale-[0.96]"
+            onClick={flow.releaseCurrentClaim}
+            type="button"
+          >
+            放弃接收
+          </button>
+        ) : null}
+        {hideLivePanels ? null : <ProgressPanel progress={flow.progress} speed={flow.speed} />}
         {hideLivePanels ? null : (
           <ModeDisclosure mode={flow.mode} diagnostics={flow.transportDiagnostics} />
         )}
-        {hideLivePanels ? null : <ProgressPanel progress={flow.progress} speed={flow.speed} />}
         <div data-testid="current-file-progress" className="hidden" />
         <div data-testid="overall-progress" className="hidden" />
       </section>
@@ -89,35 +113,6 @@ export function ReceivePageView({ flow }: ReceivePageViewProps) {
         ) : hideLivePanels ? null : (
           <EmptyHint title="等待会话入口" body="输入链接或访问码后查看文件清单。" />
         )}
-
-        {flow.stage === "manifest" || flow.stage === "failed" || flow.stage === "reconnecting" ? (
-          <>
-            <button
-              className="min-h-12 w-full rounded-lg bg-teal-600 px-4 font-bold text-white disabled:bg-neutral-200 disabled:text-neutral-500"
-              data-testid="claim-session-button"
-              disabled={!flow.session}
-              onClick={flow.claimCurrentSession}
-              type="button"
-            >
-              接收全部文件
-            </button>
-            {flow.retriesRemaining !== null ? (
-              <p className="text-neutral-600 text-sm" data-testid="retry-budget-remaining">
-                还可重试 {flow.retriesRemaining} 次，用尽后需重新创建会话。
-              </p>
-            ) : null}
-          </>
-        ) : null}
-
-        {flow.stage === "claiming" || flow.stage === "connecting" || flow.stage === "receiving" ? (
-          <button
-            className="min-h-12 w-full rounded-lg border border-neutral-200 px-4 font-medium"
-            onClick={flow.releaseCurrentClaim}
-            type="button"
-          >
-            放弃接收
-          </button>
-        ) : null}
 
         {flow.stage === "occupied" ? <OccupiedNotice /> : null}
         {shouldShowReconnectingNotice(flow.session, flow.stage) ? <ReconnectingNotice /> : null}

@@ -12,6 +12,7 @@ import {
   CreateSessionResponseSchema,
   type EndSessionRequest,
   EndSessionRequestSchema,
+  ReceiverTokenValidationResponseSchema,
   type ReleaseSessionRequest,
   ReleaseSessionRequestSchema,
   SessionAccessCodeSchema,
@@ -145,6 +146,20 @@ export async function handleApi(request: Request, env: EdgeEnv, url: URL) {
   const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
   if (request.method === "GET" && sessionMatch) {
     return sessionStub(env, sessionMatch[1] ?? "").fetch(internalRequest("/view"));
+  }
+
+  const receiverTokenMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/receiver-token$/);
+  if (request.method === "GET" && receiverTokenMatch) {
+    const response = await sessionStub(env, receiverTokenMatch[1] ?? "").fetch(
+      internalRequest("/receiver-token", {
+        headers: { "x-receiver-token": request.headers.get("x-receiver-token") ?? "" },
+      }),
+    );
+    if (response.status === 404) {
+      return json(ReceiverTokenValidationResponseSchema.parse({ valid: false }));
+    }
+    if (!response.ok) return response;
+    return json(ReceiverTokenValidationResponseSchema.parse(await response.json()));
   }
 
   const accessCodeMatch = url.pathname.match(/^\/api\/access-codes\/([^/]+)$/);

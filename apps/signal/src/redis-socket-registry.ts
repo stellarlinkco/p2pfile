@@ -7,8 +7,12 @@ export class RedisSocketRegistry {
 
   attach(sessionId: string, role: SessionRole, socket: ServerWebSocket<unknown>) {
     const sessionSockets = this.sockets.get(sessionId) ?? {};
+    const replaced = sessionSockets[role];
     sessionSockets[role] = socket;
     this.sockets.set(sessionId, sessionSockets);
+    if (replaced && replaced !== socket) {
+      replaced.close(1000, "replaced");
+    }
   }
 
   detach(sessionId: string, role: SessionRole, socket?: ServerWebSocket<unknown>) {
@@ -31,6 +35,10 @@ export class RedisSocketRegistry {
   get(sessionId: string) {
     const sessionSockets = this.sockets.get(sessionId);
     return sessionSockets ? { ...sessionSockets } : undefined;
+  }
+
+  isCurrent(sessionId: string, role: SessionRole, socket: ServerWebSocket<unknown>) {
+    return this.sockets.get(sessionId)?.[role] === socket;
   }
 
   sendToPeer(sessionId: string, fromRole: SessionRole, envelope: SignalEnvelope) {

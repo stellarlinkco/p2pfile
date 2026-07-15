@@ -192,6 +192,18 @@ export async function getSession(sessionId: string) {
   return normalizeSession(await requestJson(`/api/sessions/${sessionId}`));
 }
 
+export async function validateReceiverToken(sessionId: string, receiverToken: string) {
+  const payload = asObject(
+    await requestJson(`/api/sessions/${sessionId}/receiver-token`, {
+      headers: { "x-receiver-token": receiverToken },
+    }),
+  );
+  if (typeof payload?.valid !== "boolean") {
+    throw new Error("Receiver token validation response is invalid.");
+  }
+  return payload.valid;
+}
+
 export async function claimSession(sessionId: string, receiverToken?: string | null) {
   const payload = asObject(
     await requestJson(`/api/sessions/${sessionId}/claim`, {

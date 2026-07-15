@@ -29,6 +29,33 @@ class MemoryRedis implements RedisLike {
   }
 }
 
+class BlockingSetRedis extends MemoryRedis {
+  private nextSetGate: { markEntered: () => void; released: Promise<void> } | undefined;
+
+  blockNextSet() {
+    let markEntered = () => {};
+    let release = () => {};
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.nextSetGate = { markEntered, released };
+    return { entered, release };
+  }
+
+  override async set(key: string, value: string) {
+    const gate = this.nextSetGate;
+    this.nextSetGate = undefined;
+    if (gate) {
+      gate.markEntered();
+      await gate.released;
+    }
+    await super.set(key, value);
+  }
+}
+
 class FakeSocket {
   sent: unknown[] = [];
 
@@ -87,6 +114,21 @@ test("RedisSessionStore preserves completed and ended terminal claim states", as
 
   const endedClaim = await endedStore.claimSession(ended.sessionId);
   expect(endedClaim?.status).toBe("ended");
+});
+
+test("RedisSessionStore validates only the current receiver token", async () => {
+  const store = createMemoryStore();
+  const { claimed, created } = await createClaimedSession(store);
+  expect(await store.validateReceiverToken(created.sessionId, claimed.receiverToken)).toBe(true);
+
+  await store.releaseSession(created.sessionId, { receiverToken: claimed.receiverToken });
+  const replacement = await store.claimSession(created.sessionId);
+  if (replacement?.status !== "claimed") throw new Error("expected replacement claim");
+
+  expect(await store.validateReceiverToken(created.sessionId, claimed.receiverToken)).toBe(false);
+  expect(await store.validateReceiverToken(created.sessionId, replacement.receiverToken)).toBe(
+    true,
+  );
 });
 
 test("RedisSessionStore keeps completed view for the configured TTL", async () => {
@@ -246,6 +288,145 @@ test("RedisSessionStore restores transferring and clears reconnect TTL when send
   const session = await store.getPublicSession(created.sessionId);
   expect(session?.state).toBe("transferring");
   expect(client.expirations.has(redisSessionKey(created.sessionId))).toBe(false);
+});
+
+test("RedisSessionStore closes and rejects a replaced receiver socket", async () => {
+  const store = createMemoryStore();
+  const { claimed, created } = await createClaimedSession(store);
+  const oldReceiver = new FakeSocket();
+  const replacementReceiver = new FakeSocket();
+
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    oldReceiver as never,
+  );
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    replacementReceiver as never,
+  );
+
+  expect(oldReceiver.closeCode).toBe(1000);
+  expect(
+    await store.handleSignal(
+      created.sessionId,
+      "receiver",
+      claimed.receiverToken,
+      JSON.stringify({ type: "relay-ready", payload: {} }),
+      oldReceiver as never,
+    ),
+  ).toBe(false);
+});
+
+test("RedisSessionStore serializes socket replacement behind an in-flight signal", async () => {
+  const client = new BlockingSetRedis();
+  const store = new RedisSessionStore("redis://memory", {}, client);
+  const { claimed, created } = await createClaimedSession(store);
+  const sender = new FakeSocket();
+  const oldReceiver = new FakeSocket();
+  await store.connectSocket(created.sessionId, "sender", created.senderToken, sender as never);
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    oldReceiver as never,
+  );
+  const gate = client.blockNextSet();
+  const staleSignal = store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 0,
+        progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+      },
+    }),
+    oldReceiver as never,
+  );
+  await gate.entered;
+  const replacementReceiver = new FakeSocket();
+  const replacement = store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    replacementReceiver as never,
+  );
+  await Promise.resolve();
+  gate.release();
+
+  expect(await staleSignal).toBe(true);
+  expect(await replacement).toBe(true);
+  expect(sender.sent).toContainEqual(expect.objectContaining({ type: "receiver-ready" }));
+  expect(oldReceiver.closeCode).toBe(1000);
+});
+
+test("RedisSessionStore serializes receiver-ready before a concurrent release", async () => {
+  const client = new BlockingSetRedis();
+  const store = new RedisSessionStore("redis://memory", {}, client);
+  const { claimed, created } = await createClaimedSession(store);
+  const receiver = new FakeSocket();
+  await store.connectSocket(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    receiver as never,
+  );
+
+  const gate = client.blockNextSet();
+  const signal = store.handleSignal(
+    created.sessionId,
+    "receiver",
+    claimed.receiverToken,
+    JSON.stringify({
+      type: "receiver-ready",
+      payload: {
+        completedFiles: 0,
+        progress: resumeProgressFromManifest([{ id: "file-1", name: "hello.txt", size: 128 }]),
+      },
+    }),
+    receiver as never,
+  );
+  await gate.entered;
+  const release = store.releaseSession(created.sessionId, {
+    receiverToken: claimed.receiverToken,
+  });
+  await Promise.resolve();
+  gate.release();
+  await Promise.all([signal, release]);
+
+  const current = await store.getPublicSession(created.sessionId);
+  expect(current?.state).toBe("waiting");
+  expect(await store.validateReceiverToken(created.sessionId, claimed.receiverToken)).toBe(false);
+});
+
+test("RedisSessionStore serializes token validation behind receiver release", async () => {
+  const client = new BlockingSetRedis();
+  const store = new RedisSessionStore("redis://memory", {}, client);
+  const { claimed, created } = await createClaimedSession(store);
+  const gate = client.blockNextSet();
+  const release = store.releaseSession(created.sessionId, {
+    receiverToken: claimed.receiverToken,
+  });
+  await gate.entered;
+
+  let validationResolved = false;
+  const validation = store
+    .validateReceiverToken(created.sessionId, claimed.receiverToken)
+    .then((valid) => {
+      validationResolved = true;
+      return valid;
+    });
+  await Promise.resolve();
+
+  expect(validationResolved).toBe(false);
+  gate.release();
+  expect(await release).not.toBeNull();
+  expect(await validation).toBe(false);
 });
 
 test("RedisSessionStore sender end notifies and closes connected receiver socket", async () => {

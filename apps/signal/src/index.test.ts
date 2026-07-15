@@ -111,6 +111,13 @@ test("claim is exclusive until released", async () => {
   expect(firstBody.status).toBe("claimed");
   expect(secondBody.status).toBe("occupied");
 
+  const firstTokenValidation = await app.request(
+    new Request(`http://localhost/api/sessions/${created.sessionId}/receiver-token`, {
+      headers: { "x-receiver-token": firstBody.receiverToken },
+    }),
+  );
+  expect(await firstTokenValidation.json()).toEqual({ valid: true });
+
   const release = await app.request(
     createJsonRequest("POST", `/api/sessions/${created.sessionId}/release`, {
       receiverToken: firstBody.receiverToken,
@@ -129,6 +136,18 @@ test("claim is exclusive until released", async () => {
 
   expect(thirdBody.status).toBe("claimed");
   expect(thirdBody.receiverToken).not.toBe(firstBody.receiverToken);
+  const staleTokenValidation = await app.request(
+    new Request(`http://localhost/api/sessions/${created.sessionId}/receiver-token`, {
+      headers: { "x-receiver-token": firstBody.receiverToken },
+    }),
+  );
+  const currentTokenValidation = await app.request(
+    new Request(`http://localhost/api/sessions/${created.sessionId}/receiver-token`, {
+      headers: { "x-receiver-token": thirdBody.receiverToken },
+    }),
+  );
+  expect(await staleTokenValidation.json()).toEqual({ valid: false });
+  expect(await currentTokenValidation.json()).toEqual({ valid: true });
 });
 
 test("access code resolves back to the same share path", async () => {
@@ -147,8 +166,9 @@ test("stale sender websocket close does not end replacement connection", () => {
   const created = store.createSession({
     manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
   });
-  const oldSocket = { send() {} };
-  const replacementSocket = { send() {} };
+  let oldSocketClosed = false;
+  const oldSocket = { send() {}, close: () => (oldSocketClosed = true) };
+  const replacementSocket = { send() {}, close() {} };
 
   expect(
     store.connectSocket(created.sessionId, "sender", created.senderToken, oldSocket as never),
@@ -161,6 +181,16 @@ test("stale sender websocket close does not end replacement connection", () => {
       replacementSocket as never,
     ),
   ).toBe(true);
+  expect(oldSocketClosed).toBe(true);
+  expect(
+    store.handleSignal(
+      created.sessionId,
+      "sender",
+      created.senderToken,
+      JSON.stringify({ type: "sender-heartbeat", payload: {} }),
+      oldSocket as never,
+    ),
+  ).toBe(false);
 
   store.disconnectSocket(created.sessionId, "sender", created.senderToken, oldSocket as never);
 

@@ -7,6 +7,7 @@ import {
   DEFAULT_RETRY_BUDGET,
   type EndSessionRequest,
   EndSessionRequestSchema,
+  ReceiverTokenValidationResponseSchema,
   type ReleaseSessionRequest,
   ReleaseSessionRequestSchema,
   ReleaseSessionResponseSchema,
@@ -79,6 +80,16 @@ export class SessionDurableObject implements DurableObject {
         await this.persistSession(session);
       }
       return json(toPublicSession(session));
+    }
+
+    if (request.method === "GET" && url.pathname === "/receiver-token") {
+      return json(
+        ReceiverTokenValidationResponseSchema.parse({
+          valid:
+            session.receiverToken !== null &&
+            request.headers.get("x-receiver-token") === session.receiverToken,
+        }),
+      );
     }
 
     if (request.method === "POST" && url.pathname === "/claim") {

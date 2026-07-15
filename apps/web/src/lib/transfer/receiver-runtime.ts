@@ -14,6 +14,7 @@ import {
   handleProtocolMessage,
   makePeerConnection,
   parseProtocolMessage,
+  parseSignalBlob,
   parseSignalWire,
   preferRelayInTests,
   relayAvailable,
@@ -25,6 +26,8 @@ import type {
   ReceiverRuntimeHandlers,
   TransferProtocolMessage,
 } from "./types";
+
+export const RECEIVER_REPLACED_STATUS = "Receiver connection replaced";
 
 function restoreProgressState(
   expectedManifest: FileManifestItem[],
@@ -301,12 +304,9 @@ export async function startReceiverRuntime(
     if (stopped) {
       return;
     }
-    const data = event.data instanceof Blob ? await event.data.arrayBuffer() : event.data;
-    if (stopped) {
-      return;
-    }
-    const wire = parseSignalWire({ data });
-    if (!wire) {
+    const wire =
+      event.data instanceof Blob ? await parseSignalBlob(event.data) : parseSignalWire(event);
+    if (stopped || !wire) {
       return;
     }
 
@@ -388,8 +388,14 @@ export async function startReceiverRuntime(
     }
   });
 
-  ws.addEventListener("close", () => {
-    if (relayRequested || relayCommitQueue) stopped = true;
+  ws.addEventListener("close", (event) => {
+    if (event.reason === "replaced") {
+      stopped = true;
+      pc.close();
+      handlers.onStatus(RECEIVER_REPLACED_STATUS);
+    } else if (relayRequested || relayCommitQueue) {
+      stopped = true;
+    }
     stopRelayAnnouncements();
     stopRelayCommitQueue();
   });
@@ -415,6 +421,12 @@ export async function startReceiverRuntime(
       stopRelayCommitQueue();
       pc.close();
       ws.close();
+    },
+    isAlive() {
+      return !stopped;
+    },
+    isEstablished() {
+      return !stopped && (dataChannelOpen || relayRequested);
     },
   };
 }

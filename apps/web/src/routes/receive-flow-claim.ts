@@ -8,7 +8,7 @@ import type {
   TransferProgress,
   TransportDiagnostics,
 } from "../lib/transfer";
-import { startReceiverRuntime } from "../lib/transfer";
+import { RECEIVER_REPLACED_STATUS, startReceiverRuntime } from "../lib/transfer";
 import { clearReceivedFiles, stopReceiverRuntime } from "./receive-flow-cleanup";
 import {
   nextReceiverStageAfterProgress,
@@ -180,16 +180,18 @@ export async function claimReceiverSession({
               return markFileStates(current, "receiving", "reconnecting");
             });
           }
-          setStage((current) => {
-            if (runtimeFinished || current === "completed") {
-              return current;
-            }
-            return reconnecting
-              ? "reconnecting"
-              : nextStatus.includes("Receiving")
-                ? "receiving"
-                : "connecting";
-          });
+          if (reconnecting && runtimeRef.current && !runtimeRef.current.isEstablished()) {
+            stopReceiverRuntime(runtimeRef);
+          }
+          setStage((current) =>
+            runtimeFinished
+              ? current
+              : receiverStageFromRuntimeStatus(
+                  current,
+                  nextStatus,
+                  runtimeRef.current?.isEstablished() === true,
+                ),
+          );
         },
         onMode(nextMode) {
           if (runtimeFinished) {
@@ -288,6 +290,29 @@ export async function claimReceiverSession({
     setStage("failed");
     setStatus("Claim 或连接失败。请重试或请求发送方重新创建会话。");
   }
+}
+
+export function receiverStageFromRuntimeStatus(
+  current: ReceiverStage,
+  nextStatus: string,
+  runtimeEstablished: boolean,
+): ReceiverStage {
+  if (current === "completed") {
+    return current;
+  }
+  if (nextStatus === "Waiting for peer reconnect") {
+    return current === "receiving" && runtimeEstablished ? "receiving" : "reconnecting";
+  }
+  if (nextStatus === "Direct Transfer connected") {
+    return runtimeEstablished ? "receiving" : "connecting";
+  }
+  if (nextStatus === "Relayed Transfer connected") {
+    return "receiving";
+  }
+  if (nextStatus === RECEIVER_REPLACED_STATUS) {
+    return "occupied";
+  }
+  return nextStatus.includes("Receiving") ? "receiving" : "connecting";
 }
 
 function markFileStates(

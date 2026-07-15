@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { type FileManifestItem, MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
 import type { ReceivedFile } from "../lib/transfer";
-import { resumeCommittedBytesByFileId } from "./receive-flow-claim";
+import { receiverStageFromRuntimeStatus, resumeCommittedBytesByFileId } from "./receive-flow-claim";
 import { cacheActiveReceiveProgress } from "./received-file-cache";
 
 const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -40,6 +40,39 @@ afterEach(() => {
   } else {
     Reflect.deleteProperty(globalThis, "localStorage");
   }
+});
+
+test("sender reconnect signal preserves a live receiving runtime stage", () => {
+  expect(receiverStageFromRuntimeStatus("receiving", "Waiting for peer reconnect", true)).toBe(
+    "receiving",
+  );
+  expect(receiverStageFromRuntimeStatus("connecting", "Waiting for peer reconnect", true)).toBe(
+    "reconnecting",
+  );
+  expect(receiverStageFromRuntimeStatus("receiving", "Waiting for peer reconnect", false)).toBe(
+    "reconnecting",
+  );
+});
+
+test("connected transport status enters receiving before first progress", () => {
+  expect(receiverStageFromRuntimeStatus("connecting", "Direct Transfer connected", true)).toBe(
+    "receiving",
+  );
+  expect(receiverStageFromRuntimeStatus("connecting", "Direct Transfer connected", false)).toBe(
+    "connecting",
+  );
+  expect(receiverStageFromRuntimeStatus("connecting", "Relayed Transfer connected", true)).toBe(
+    "receiving",
+  );
+  expect(receiverStageFromRuntimeStatus("connecting", "Relayed Transfer connected", false)).toBe(
+    "receiving",
+  );
+});
+
+test("replacement status removes a superseded receiver from the active stage", () => {
+  expect(receiverStageFromRuntimeStatus("connecting", "Receiver connection replaced", false)).toBe(
+    "occupied",
+  );
 });
 
 test("resume committed bytes composes completed cached files with active committed progress", () => {

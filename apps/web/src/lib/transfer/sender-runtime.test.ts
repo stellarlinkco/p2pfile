@@ -189,10 +189,10 @@ class FakeWebSocket {
     this.sent.push(data);
   }
 
-  close() {
+  close(reason = "") {
     this.readyState = FakeWebSocket.CLOSED;
     for (const listener of this.listeners.get("close") ?? []) {
-      listener({} as MessageEvent<string>);
+      listener({ reason } as unknown as MessageEvent<string>);
     }
   }
 
@@ -463,6 +463,27 @@ test("accidental signal socket close reattaches sender with the same token", asy
     expect(FakePeerConnection.instances.length).toBeGreaterThanOrEqual(2);
 
     runtime.stop();
+  });
+});
+
+test("replacement signal socket close stops sender instead of reconnecting", async () => {
+  await withSenderHarness(undefined, async ({ peer, settle }) => {
+    await startSenderRuntime("session-replaced", "sender-token", [], [], {
+      onStatus() {},
+      onMode() {},
+      onProgress() {},
+      onComplete() {},
+      onError() {},
+    });
+    await settle();
+
+    const firstSocket = FakeWebSocket.instances[0];
+    if (!firstSocket) throw new Error("expected first signal socket");
+    firstSocket.close("replaced");
+    await settle();
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(peer(0).closed).toBe(true);
   });
 });
 test("signal socket close during an active direct large transfer keeps the data channel alive", async () => {

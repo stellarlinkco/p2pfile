@@ -3,86 +3,9 @@ import { type FileManifestItem, MANIFEST_CHUNK_BYTES } from "@p2pfile/shared";
 import { createSha256Digest } from "./digest";
 import { buildReceiverState, handleProtocolMessage } from "./receiver-protocol";
 import { startReceiverRuntime } from "./receiver-runtime";
+import { FakePeerConnection, FakeWebSocket } from "./receiver-runtime-fixtures";
 import { encodeBinaryRelayChunkFrame } from "./relay-runtime";
-import type { BrowserSignalMessage, ReceiverRuntimeHandlers } from "./types";
-
-class FakePeerConnection {
-  static instances: FakePeerConnection[] = [];
-  iceGatheringState: RTCIceGatheringState = "complete";
-  localDescription: RTCSessionDescription | null = null;
-  private readonly listeners = new Map<string, Array<(event: RTCDataChannelEvent) => void>>();
-
-  constructor() {
-    FakePeerConnection.instances.push(this);
-  }
-
-  addEventListener(type: string, listener: (event: RTCDataChannelEvent) => void) {
-    const listeners = this.listeners.get(type) ?? [];
-    listeners.push(listener);
-    this.listeners.set(type, listeners);
-  }
-
-  dispatchDataChannel(channel: RTCDataChannel) {
-    const event = { channel } as RTCDataChannelEvent;
-    for (const listener of this.listeners.get("datachannel") ?? []) {
-      listener(event);
-    }
-  }
-
-  getStats = async () => new Map() as unknown as RTCStatsReport;
-  close() {}
-  async setRemoteDescription() {}
-  async createAnswer(): Promise<RTCSessionDescriptionInit> {
-    return { type: "answer", sdp: "v=0 fake-answer" };
-  }
-  async setLocalDescription(description: RTCSessionDescriptionInit) {
-    this.localDescription = { ...description, toJSON: () => description } as RTCSessionDescription;
-  }
-  async addIceCandidate() {}
-}
-
-class FakeWebSocket {
-  static readonly OPEN = 1;
-  static instances: FakeWebSocket[] = [];
-  readyState = FakeWebSocket.OPEN;
-  binaryType: BinaryType = "blob";
-  sent: BrowserSignalMessage[] = [];
-  private readonly listeners = new Map<string, Array<(event: MessageEvent) => void>>();
-
-  constructor(readonly url: string) {
-    FakeWebSocket.instances.push(this);
-  }
-
-  addEventListener(type: string, listener: (event: MessageEvent) => void) {
-    const listeners = this.listeners.get(type) ?? [];
-    listeners.push(listener);
-    this.listeners.set(type, listeners);
-  }
-
-  send(data: string) {
-    this.sent.push(JSON.parse(data) as BrowserSignalMessage);
-  }
-
-  dispatchMessage(message: BrowserSignalMessage) {
-    const event = { data: JSON.stringify(message) } as MessageEvent<string>;
-    for (const listener of this.listeners.get("message") ?? []) {
-      listener(event);
-    }
-  }
-
-  dispatchBlob(frame: ArrayBuffer) {
-    const event = { data: new Blob([frame]) } as MessageEvent;
-    for (const listener of this.listeners.get("message") ?? []) {
-      listener(event);
-    }
-  }
-
-  close() {
-    for (const listener of this.listeners.get("close") ?? []) {
-      listener({} as MessageEvent);
-    }
-  }
-}
+import type { ReceiverRuntimeHandlers } from "./types";
 
 function receiverHandlers(): ReceiverRuntimeHandlers {
   return {
@@ -895,5 +818,61 @@ test("receiver accepts a nonzero relay generation manifest", async () => {
     } finally {
       runtime.stop();
     }
+  });
+});
+
+test("stopped receiver runtime reports not alive after stop and after relay socket close", async () => {
+  await withReceiverHarness(async () => {
+    const file: FileManifestItem = {
+      id: "file-1",
+      name: "alpha.txt",
+      size: 1,
+      mimeType: "text/plain",
+    };
+
+    const stoppedByStop = await startReceiverRuntime(
+      "session-alive-stop",
+      "receiver-token",
+      [file],
+      receiverHandlers(),
+    );
+    expect(stoppedByStop.isAlive()).toBe(true);
+    expect(stoppedByStop.isEstablished()).toBe(false);
+    stoppedByStop.stop();
+    expect(stoppedByStop.isAlive()).toBe(false);
+    expect(stoppedByStop.isEstablished()).toBe(false);
+
+    const replacementStatuses: string[] = [];
+    const stoppedByReplacement = await startReceiverRuntime(
+      "session-alive-replaced",
+      "receiver-token",
+      [file],
+      {
+        ...receiverHandlers(),
+        onStatus(status) {
+          replacementStatuses.push(status);
+        },
+      },
+    );
+    const replacementSocket = FakeWebSocket.instances.at(-1);
+    replacementSocket?.close("replaced");
+    expect(stoppedByReplacement.isAlive()).toBe(false);
+    expect(stoppedByReplacement.isEstablished()).toBe(false);
+    expect(replacementStatuses).toContain("Receiver connection replaced");
+
+    const stoppedByRelayClose = await startReceiverRuntime(
+      "session-alive-relay-close",
+      "receiver-token",
+      [file],
+      receiverHandlers(),
+    );
+    expect(stoppedByRelayClose.isAlive()).toBe(true);
+    const socket = FakeWebSocket.instances.at(-1);
+    socket?.dispatchMessage({ type: "mode", payload: { mode: "relay" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stoppedByRelayClose.isEstablished()).toBe(true);
+    socket?.close();
+    expect(stoppedByRelayClose.isAlive()).toBe(false);
+    expect(stoppedByRelayClose.isEstablished()).toBe(false);
   });
 });

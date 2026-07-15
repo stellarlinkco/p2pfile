@@ -95,6 +95,11 @@ export class LiveSessionStore {
     return SessionPublicViewSchema.parse(toPublicSession(session));
   }
 
+  validateReceiverToken(sessionId: string, receiverToken: string) {
+    this.sweepExpired();
+    return this.sessions.get(sessionId)?.receiverToken === receiverToken;
+  }
+
   claimSession(sessionId: string, receiverToken?: string) {
     this.sweepExpired();
     const session = this.sessions.get(sessionId);
@@ -225,8 +230,11 @@ export class LiveSessionStore {
     if (!session || !isValidRoleToken(session, role, token) || isTerminallyClosed(session))
       return false;
     if (role === "receiver" && session.state === "waiting") return false;
-    detachSocket(session, role);
+    const replaced = session.sockets[role];
     session.sockets[role] = socket;
+    if (replaced && replaced !== socket) {
+      replaced.close(1000, "replaced");
+    }
     if (role === "sender") {
       session.senderLastSeenAt = this.now();
       if (session.state === "reconnecting") {
@@ -262,10 +270,12 @@ export class LiveSessionStore {
     role: SessionRole,
     token: string,
     rawMessage: string | ArrayBuffer | ArrayBufferView,
+    socket?: ServerWebSocket<unknown>,
   ) {
     const session = this.sessions.get(sessionId);
     if (!session || !isValidRoleToken(session, role, token) || isTerminallyClosed(session))
       return false;
+    if (socket && session.sockets[role] !== socket) return false;
 
     // Opaque binary relay frames (chunk payloads) are forwarded without JSON parsing.
     if (typeof rawMessage !== "string") {

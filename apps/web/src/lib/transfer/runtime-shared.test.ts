@@ -75,6 +75,24 @@ function withTurnUrl<T>(value: string | undefined, run: () => T): T {
   }
 }
 
+function withStunUrl<T>(value: string | undefined, run: () => T): T {
+  const previous = process.env.VITE_STUN_URL;
+  if (value === undefined) {
+    delete process.env.VITE_STUN_URL;
+  } else {
+    process.env.VITE_STUN_URL = value;
+  }
+  try {
+    return run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.VITE_STUN_URL;
+    } else {
+      process.env.VITE_STUN_URL = previous;
+    }
+  }
+}
+
 test("a relay-disclosed peer connection reports relay mode without signaling a mode switch", () => {
   withFakePeerConnection(() => {
     const sent: BrowserSignalMessage[] = [];
@@ -130,6 +148,19 @@ test("turnConfigured reflects the VITE_TURN_URL environment", () => {
   expect(withTurnUrl(undefined, () => turnConfigured())).toBe(false);
   expect(withTurnUrl("", () => turnConfigured())).toBe(false);
   expect(withTurnUrl("turn:turn.example.com:3478", () => turnConfigured())).toBe(true);
+});
+
+test("VITE_STUN_URL replaces public STUN servers for deterministic environments", () => {
+  withFakePeerConnection(() => {
+    withTurnUrl(undefined, () => {
+      withStunUrl("stun:127.0.0.1:3478", () => {
+        makePeerConnection(fakeSignalSocket([]), receiverHandlersWith({}), "Connecting");
+      });
+    });
+    expect(FakePeerConnection.instances[0]?.config.iceServers).toEqual([
+      { urls: "stun:127.0.0.1:3478" },
+    ]);
+  });
 });
 
 function receiverHandlersWith(

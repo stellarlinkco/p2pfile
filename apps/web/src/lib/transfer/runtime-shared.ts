@@ -28,11 +28,16 @@ export function turnConfigured() {
   return configuredTurnUrl() !== null;
 }
 
+function configuredStunServers(): RTCIceServer[] {
+  const stunUrl = import.meta.env?.VITE_STUN_URL;
+  if (typeof stunUrl === "string" && stunUrl.length > 0) {
+    return [{ urls: stunUrl }];
+  }
+  return [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:global.stun.twilio.com:3478" }];
+}
+
 function configuredIceServers(): RTCIceServer[] {
-  const servers: RTCIceServer[] = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:global.stun.twilio.com:3478" },
-  ];
+  const servers = configuredStunServers();
 
   const turnUrl = configuredTurnUrl();
   if (turnUrl !== null) {
@@ -239,6 +244,13 @@ export function parseSignalWire(raw: MessageEvent | { data: unknown }): ParsedSi
   }
 
   return null;
+}
+
+export async function parseSignalBlob(blob: Blob): Promise<ParsedSignalWire | null> {
+  const data = await blob.arrayBuffer();
+  const binary = parseSignalWire({ data });
+  if (binary) return binary;
+  return parseSignalWire({ data: new TextDecoder().decode(data) });
 }
 
 export function parseSignalMessage(

@@ -1,4 +1,4 @@
-export { startReceiverRuntime, startSenderRuntime } from "./runtime";
+export { RECEIVER_REPLACED_STATUS, startReceiverRuntime, startSenderRuntime } from "./runtime";
 export type {
   BrowserSignalMessage,
   ForwardedSignalMessage,

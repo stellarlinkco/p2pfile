@@ -193,9 +193,11 @@ type ManifestPanelProps = {
 export function ModeDisclosure({
   mode,
   diagnostics = null,
+  testId = "mode-disclosure",
 }: {
   mode: TransferMode | null;
   diagnostics?: TransportDiagnostics | null;
+  testId?: string | null;
 }) {
   const formattedMode = formatMode(mode);
   const pathLabel = diagnostics
@@ -211,7 +213,7 @@ export function ModeDisclosure({
     : null;
 
   return (
-    <section className={panelClass} data-testid="mode-disclosure">
+    <section className={panelClass} data-testid={testId ?? undefined}>
       <div className="mb-3 flex items-center justify-between gap-4">
         <h3 className="font-bold text-lg">传输方式</h3>
         <span className="rounded-full bg-teal-50 px-3 py-1 font-medium text-sm text-teal-700">

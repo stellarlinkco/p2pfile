@@ -50,6 +50,7 @@ export class RedisSessionStore {
   private readonly now: () => number;
 
   private readonly sockets = new RedisSocketRegistry();
+  private readonly sessionMutationTails = new Map<string, Promise<void>>();
 
   constructor(redisUrl: string, options: LiveSessionStoreOptions = {}, client?: RedisLike) {
     this.client = client ?? createRedisClient(redisUrl);
@@ -83,11 +84,17 @@ export class RedisSessionStore {
   }
 
   async getPublicSession(sessionId: string) {
-    const session = await this.load(sessionId);
-    return session ? SessionPublicViewSchema.parse(toPublicSession(session)) : null;
+    return this.withSessionMutation(sessionId, async () => {
+      const session = await this.load(sessionId);
+      return session ? SessionPublicViewSchema.parse(toPublicSession(session)) : null;
+    });
   }
 
   async viewSession(sessionId: string) {
+    return this.withSessionMutation(sessionId, () => this.viewSessionUnlocked(sessionId));
+  }
+
+  private async viewSessionUnlocked(sessionId: string) {
     const session = await this.load(sessionId);
     if (!session) return null;
     if (session.state === "waiting") {
@@ -97,7 +104,20 @@ export class RedisSessionStore {
     return SessionPublicViewSchema.parse(toPublicSession(session));
   }
 
+  async validateReceiverToken(sessionId: string, receiverToken: string) {
+    return this.withSessionMutation(
+      sessionId,
+      async () => (await this.load(sessionId))?.receiverToken === receiverToken,
+    );
+  }
+
   async claimSession(sessionId: string, receiverToken?: string) {
+    return this.withSessionMutation(sessionId, () =>
+      this.claimSessionUnlocked(sessionId, receiverToken),
+    );
+  }
+
+  private async claimSessionUnlocked(sessionId: string, receiverToken?: string) {
     const session = await this.load(sessionId);
     if (!session) return null;
     const terminalClaim = terminalClaimResponse(session, receiverToken);
@@ -145,6 +165,10 @@ export class RedisSessionStore {
   }
 
   async releaseSession(sessionId: string, input: ReleaseSessionRequest) {
+    return this.withSessionMutation(sessionId, () => this.releaseSessionUnlocked(sessionId, input));
+  }
+
+  private async releaseSessionUnlocked(sessionId: string, input: ReleaseSessionRequest) {
     const session = await this.load(sessionId);
     if (!session) return null;
     if (!isActiveSessionState(session.state) || session.receiverToken !== input.receiverToken) {
@@ -167,6 +191,12 @@ export class RedisSessionStore {
   }
 
   async completeSession(sessionId: string, input: CompleteSessionRequest) {
+    return this.withSessionMutation(sessionId, () =>
+      this.completeSessionUnlocked(sessionId, input),
+    );
+  }
+
+  private async completeSessionUnlocked(sessionId: string, input: CompleteSessionRequest) {
     const session = await this.load(sessionId);
     if (
       !session ||
@@ -184,6 +214,10 @@ export class RedisSessionStore {
   }
 
   async endSession(sessionId: string, input: EndSessionRequest) {
+    return this.withSessionMutation(sessionId, () => this.endSessionUnlocked(sessionId, input));
+  }
+
+  private async endSessionUnlocked(sessionId: string, input: EndSessionRequest) {
     const session = await this.load(sessionId);
     if (!session || session.senderToken !== input.senderToken) return null;
     if (
@@ -198,6 +232,17 @@ export class RedisSessionStore {
   }
 
   async connectSocket(
+    sessionId: string,
+    role: string,
+    token: string,
+    socket: ServerWebSocket<unknown>,
+  ) {
+    return this.withSessionMutation(sessionId, () =>
+      this.connectSocketUnlocked(sessionId, role, token, socket),
+    );
+  }
+
+  private async connectSocketUnlocked(
     sessionId: string,
     role: string,
     token: string,
@@ -232,6 +277,17 @@ export class RedisSessionStore {
     token: string,
     socket?: ServerWebSocket<unknown>,
   ) {
+    return this.withSessionMutation(sessionId, () =>
+      this.disconnectSocketUnlocked(sessionId, role, token, socket),
+    );
+  }
+
+  private async disconnectSocketUnlocked(
+    sessionId: string,
+    role: string,
+    token: string,
+    socket?: ServerWebSocket<unknown>,
+  ) {
     const session = await this.load(sessionId);
     if (!session || session.state === "ended" || session.state === "failed") return;
     if (role === "sender" && session.senderToken !== token) return;
@@ -261,16 +317,33 @@ export class RedisSessionStore {
     role: string,
     token: string,
     rawMessage: string | ArrayBuffer | ArrayBufferView,
+    socket?: ServerWebSocket<unknown>,
+  ) {
+    return this.withSessionMutation(sessionId, () =>
+      this.handleSignalUnlocked(sessionId, role, token, rawMessage, socket),
+    );
+  }
+
+  private async handleSignalUnlocked(
+    sessionId: string,
+    role: string,
+    token: string,
+    rawMessage: string | ArrayBuffer | ArrayBufferView,
+    socket?: ServerWebSocket<unknown>,
   ) {
     const session = await this.load(sessionId);
     if (!session || session.state === "failed" || session.state === "ended") return false;
     if (role === "sender" && session.senderToken !== token) return false;
     if (role === "receiver" && session.receiverToken !== token) return false;
     const signalRole = role as SessionRole;
+    const isCurrentSocket = () =>
+      socket === undefined || this.sockets.isCurrent(sessionId, signalRole, socket);
+    if (!isCurrentSocket()) return false;
 
     if (typeof rawMessage !== "string") {
       markTransferring(session);
       await this.save(session);
+      if (!isCurrentSocket()) return false;
       this.sockets.sendBinaryToPeer(sessionId, signalRole, rawMessage);
       return true;
     }
@@ -289,6 +362,7 @@ export class RedisSessionStore {
       if (role !== "receiver") return false;
       markTransferring(session);
       await this.save(session);
+      if (!isCurrentSocket()) return false;
       this.sockets.sendToPeer(sessionId, signalRole, envelope);
       return true;
     }
@@ -299,6 +373,7 @@ export class RedisSessionStore {
         await this.save(session);
       } else {
         await this.save(session);
+        if (!isCurrentSocket()) return false;
         this.sockets.sendToPeer(sessionId, signalRole, envelope);
         this.sockets.clear(sessionId);
       }
@@ -318,12 +393,14 @@ export class RedisSessionStore {
     const normalized = normalizeAccessCode(code);
     const sessionId = await getRedisAccessCodeSessionId(this.client, normalized);
     if (!sessionId) return null;
-    const session = await this.load(sessionId);
-    if (!session) {
-      await deleteRedisAccessCode(this.client, normalized);
-      return null;
-    }
-    return AccessCodeResolveResponseSchema.parse({ sessionId, sharePath: session.sharePath });
+    return this.withSessionMutation(sessionId, async () => {
+      const session = await this.load(sessionId);
+      if (!session) {
+        await deleteRedisAccessCode(this.client, normalized);
+        return null;
+      }
+      return AccessCodeResolveResponseSchema.parse({ sessionId, sharePath: session.sharePath });
+    });
   }
 
   private async unusedSessionId() {
@@ -347,6 +424,21 @@ export class RedisSessionStore {
     session.endedAt = endedAt;
     session.openExpiresAt = endedAt + this.completedViewTtlMs;
     this.sockets.clear(sessionId);
+  }
+
+  private async withSessionMutation<T>(sessionId: string, mutation: () => Promise<T>) {
+    const previous = this.sessionMutationTails.get(sessionId);
+    const current = Promise.withResolvers<void>();
+    this.sessionMutationTails.set(sessionId, current.promise);
+    if (previous) await previous;
+    try {
+      return await mutation();
+    } finally {
+      current.resolve();
+      if (this.sessionMutationTails.get(sessionId) === current.promise) {
+        this.sessionMutationTails.delete(sessionId);
+      }
+    }
   }
 
   private async load(sessionId: string) {

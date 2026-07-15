@@ -15,9 +15,9 @@ const handlers: SenderRuntimeHandlers = {
 class FakeSignalSocket {
   readyState = WebSocket.OPEN;
   sent: BrowserSignalMessage[] = [];
-  private readonly listeners = new Set<(event: MessageEvent) => void>();
+  private readonly listeners = new Set<(event: MessageEvent) => void | Promise<void>>();
 
-  addEventListener(type: string, listener: (event: MessageEvent) => void) {
+  addEventListener(type: string, listener: (event: MessageEvent) => void | Promise<void>) {
     if (type === "message") this.listeners.add(listener);
   }
 
@@ -31,9 +31,11 @@ class FakeSignalSocket {
     }
   }
 
-  receiveBlob(message: BrowserSignalMessage) {
+  async receiveBlob(message: BrowserSignalMessage) {
     const data = new Blob([JSON.stringify(message)], { type: "application/json" });
-    for (const listener of this.listeners) listener({ data } as MessageEvent<Blob>);
+    await Promise.all(
+      [...this.listeners].map((listener) => listener({ data } as MessageEvent<Blob>)),
+    );
   }
 }
 
@@ -95,11 +97,10 @@ test("sender parses JSON signaling delivered as a Blob", async () => {
 
   try {
     attach(ws, queue, { handleReceiverReady: () => (receiverReady = true) });
-    ws.receiveBlob({
+    await ws.receiveBlob({
       type: "receiver-ready",
       payload: { progress: { manifestHash: "", files: [] } },
     });
-    await Bun.sleep(0);
     expect(receiverReady).toBe(true);
   } finally {
     queue.stop();

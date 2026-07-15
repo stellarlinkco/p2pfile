@@ -4,6 +4,7 @@ import {
   ClaimSessionResponseSchema,
   CreateSessionResponseSchema,
   DEFAULT_RETRY_BUDGET,
+  ReceiverTokenValidationResponseSchema,
   ReleaseSessionResponseSchema,
   SessionMutationResponseSchema,
 } from "@p2pfile/shared";
@@ -66,6 +67,70 @@ test("Receiver Token claim is exclusive and token holder can re-enter", async ()
   if (reentryBody.status !== "claimed") throw new Error("expected re-entry claim");
   expect(reentryBody.receiverToken).toBe(firstBody.receiverToken);
   expect(reentryBody.retriesRemaining).toBe(firstBody.retriesRemaining - 1);
+});
+
+test("Receiver Token validation tracks release and replacement claims without consuming retry", async () => {
+  resetEdgeSessionsForTests();
+  const env = createEnv();
+  const { body } = await createSession(env);
+  const created = CreateSessionResponseSchema.parse(body);
+  const firstClaim = await claimReceiver(env, created.sessionId);
+
+  const validate = (receiverToken: string) =>
+    handleRequest(
+      request(`/api/sessions/${created.sessionId}/receiver-token`, {
+        headers: { "x-receiver-token": receiverToken },
+      }),
+      env,
+    );
+  expect(
+    ReceiverTokenValidationResponseSchema.parse(
+      await (await validate(firstClaim.receiverToken)).json(),
+    ),
+  ).toEqual({
+    valid: true,
+  });
+
+  await handleRequest(
+    request(`/api/sessions/${created.sessionId}/release`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ receiverToken: firstClaim.receiverToken }),
+    }),
+    env,
+  );
+  const replacement = await claimReceiver(env, created.sessionId);
+
+  expect(
+    ReceiverTokenValidationResponseSchema.parse(
+      await (await validate(firstClaim.receiverToken)).json(),
+    ),
+  ).toEqual({
+    valid: false,
+  });
+  expect(
+    ReceiverTokenValidationResponseSchema.parse(
+      await (await validate(replacement.receiverToken)).json(),
+    ),
+  ).toEqual({
+    valid: true,
+  });
+  expect(replacement.retriesRemaining).toBe(DEFAULT_RETRY_BUDGET);
+});
+
+test("Receiver Token validation returns false for a missing session", async () => {
+  resetEdgeSessionsForTests();
+  const response = await handleRequest(
+    request("/api/sessions/aaaaaaaaaaaa/receiver-token", {
+      headers: { "x-receiver-token": "receiver-token-receiver-token" },
+    }),
+    createEnv(),
+  );
+
+  expect(response.status).toBe(200);
+  expect(ReceiverTokenValidationResponseSchema.parse(await response.json())).toEqual({
+    valid: false,
+  });
 });
 
 test("original Receiver Token holder can retry until the bounded budget is exhausted", async () => {

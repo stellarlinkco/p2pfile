@@ -22,7 +22,35 @@ type SenderEndedPollingOptions = {
 };
 
 export function shouldStopReceiverRuntimeForReconnectingPoll(stage: ReceiverStage) {
-  return stage !== "receiving";
+  // A sender signaling reconnect does not invalidate an established DataChannel.
+  // Stopping it would discard live transfer state and force a false resume.
+  return stage === "manifest" || stage === "connecting";
+}
+
+export function isReceiverRuntimeActive(runtime: ReceiverRuntime | null | undefined) {
+  return runtime?.isAlive() === true;
+}
+
+export function isReceiverRuntimeEstablished(runtime: ReceiverRuntime | null | undefined) {
+  return runtime?.isEstablished() === true;
+}
+
+export function receiverStageForReconnectingPoll(
+  stage: ReceiverStage,
+  runtime: ReceiverRuntime | null | undefined,
+): ReceiverStage {
+  return stage === "receiving" && isReceiverRuntimeEstablished(runtime)
+    ? "receiving"
+    : "reconnecting";
+}
+
+export function shouldRestartReceiverFromReconnectingPoll(
+  stage: ReceiverStage,
+  runtime: ReceiverRuntime | null | undefined,
+) {
+  return (
+    stage === "reconnecting" || (stage === "receiving" && !isReceiverRuntimeEstablished(runtime))
+  );
 }
 
 export function shouldPollSenderEndedForStage(stage: ReceiverStage) {
@@ -89,8 +117,8 @@ export function useSenderEndedPolling({
           setStatus(RECONNECTING_STATUS);
           if (shouldStopReceiverRuntimeForReconnectingPoll(stage)) {
             stopReceiverRuntime(runtimeRef);
-            setStage("reconnecting");
           }
+          setStage(receiverStageForReconnectingPoll(stage, runtimeRef.current));
           return;
         }
 
@@ -107,10 +135,12 @@ export function useSenderEndedPolling({
         if (shouldRecoverFromReconnectingPoll(stage, latest)) {
           setSession(latest);
           setMode(latest.transferMode);
-          if (stage === "reconnecting") {
+          if (shouldRestartReceiverFromReconnectingPoll(stage, runtimeRef.current)) {
+            stopReceiverRuntime(runtimeRef);
             setStage("manifest");
             setStatus("发送方已重新连接：请继续接收。");
           } else {
+            setStage("receiving");
             setStatus("发送方已重新连接，继续接收中。");
           }
           return;

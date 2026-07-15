@@ -1,7 +1,7 @@
 import type { TransferMode } from "@p2pfile/shared";
 import type { SessionPublicView } from "../lib/api";
-import { claimSession, getSession } from "../lib/api";
-import { readReceiverToken } from "../lib/session-storage";
+import { claimSession, getSession, validateReceiverToken } from "../lib/api";
+import { clearReceiverToken, readReceiverToken } from "../lib/session-storage";
 import type { ReceivedFile, TransferProgress } from "../lib/transfer";
 import {
   initialProgress,
@@ -75,22 +75,24 @@ export async function loadReceiverSession(
         context.setStage("completion-notice");
         context.setStatus("Completion Notice：该会话已完成；如需重新接收，请让发送方重新创建。");
       }
-    } else if (nextSession.status === "claimed" || nextSession.status === "reconnecting") {
-      const claimed = await claimSession(sessionId, receiverToken);
-      if (claimed.claim === "occupied") {
-        context.setSession(claimed.session);
-        context.setProgress(await progressForLoadedSession(sessionId, claimed.session));
-        context.setMode(claimed.session.transferMode);
+    } else if (
+      nextSession.status === "claimed" ||
+      nextSession.status === "connecting" ||
+      nextSession.status === "reconnecting" ||
+      nextSession.status === "transferring"
+    ) {
+      context.setSession(nextSession);
+      context.setProgress(await progressForLoadedSession(sessionId, nextSession));
+      context.setMode(nextSession.transferMode);
+      if (!receiverToken || !(await validateReceiverToken(sessionId, receiverToken))) {
         context.setStage("occupied");
         context.setStatus("Occupied Session Notice：已有另一个接收方 claim 了该会话。");
+        if (receiverToken) clearReceiverToken(sessionId);
       } else {
-        context.setSession(claimed.session);
-        context.setProgress(await progressForLoadedSession(sessionId, claimed.session));
-        context.setMode(claimed.session.transferMode);
-        if (claimed.claim === "claimed") {
-          context.setRetriesRemaining(claimed.retriesRemaining);
+        if (typeof nextSession.retriesRemaining === "number") {
+          context.setRetriesRemaining(nextSession.retriesRemaining);
         }
-        applySessionStage(context, claimed.session);
+        applySessionStage(context, nextSession);
       }
     } else {
       context.setSession(nextSession);

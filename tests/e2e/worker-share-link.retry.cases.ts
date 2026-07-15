@@ -45,7 +45,7 @@ test("Worker interrupted receiver retry retains completed files and restarts at 
     });
     await receiver.reload();
 
-    await expect(receiver.getByTestId("retry-budget-remaining")).toContainText("2");
+    await expect(receiver.getByTestId("retry-budget-remaining")).toContainText("3");
     const retryBudgetText = await receiver.getByTestId("retry-budget-remaining").textContent();
     await receiver.getByTestId("claim-session-button").click();
 
@@ -113,13 +113,14 @@ test("Worker sender interruption lets receiver reuse same Share Link at file bou
         window as unknown as { __P2PFILE_CLOSE_SENDER_SIGNAL__: () => void }
       ).__P2PFILE_CLOSE_SENDER_SIGNAL__(),
     );
-    await expect(receiver.getByTestId("reconnecting-session-notice")).toBeVisible({
+    await expect(receiver.getByTestId("session-status")).toContainText("发送方已重新连接", {
       timeout: 15_000,
     });
+    await expect(receiver.getByTestId("reconnecting-session-notice")).toHaveCount(0);
 
     await receiver.reload();
     await expect(receiver).toHaveURL(shareLink);
-    await expect(receiver.getByTestId("retry-budget-remaining")).toContainText("2");
+    await expect(receiver.getByTestId("retry-budget-remaining")).toContainText("3");
     await receiver.getByTestId("claim-session-button").click();
     await waitForCompletedSession(receiver);
     await waitForCompletedSession(page);

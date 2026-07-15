@@ -1,6 +1,7 @@
 import type { FileManifestItem } from "@p2pfile/shared";
 import { startReceiverRuntime as startDirectReceiverRuntime } from "./receiver-runtime";
 
+export { RECEIVER_REPLACED_STATUS } from "./receiver-runtime";
 export {
   applyMode,
   awaitBufferedAmount,

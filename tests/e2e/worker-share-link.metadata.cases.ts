@@ -7,7 +7,7 @@ test("Worker same-origin Share Link opens metadata-only Frozen Manifest", async 
   observeApiRequests(page, apiRequests);
 
   await page.goto("/receive");
-  await expect(page.getByRole("heading", { name: "接收文件" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "打开传输" })).toBeVisible();
   const statusResponse = await page.request.get("/api/status");
   expect(statusResponse.ok()).toBe(true);
   expect(await statusResponse.json()).toMatchObject({ ok: true, service: "signal" });

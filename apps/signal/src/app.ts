@@ -6,6 +6,7 @@ import {
   CompleteSessionRequestSchema,
   CreateSessionRequestSchema,
   EndSessionRequestSchema,
+  ReceiverTokenValidationResponseSchema,
   ReleaseSessionRequestSchema,
   SessionRoleSchema,
 } from "@p2pfile/shared";
@@ -58,7 +59,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     cors({
       origin: "*",
       allowMethods: ["GET", "POST", "OPTIONS"],
-      allowHeaders: ["content-type"],
+      allowHeaders: ["content-type", "x-receiver-token"],
     }),
   );
 
@@ -84,6 +85,14 @@ export const createApp = (options: CreateAppOptions = {}) => {
     }
 
     return c.json(session);
+  });
+
+  app.get("/api/sessions/:id/receiver-token", async (c) => {
+    const valid = await store.validateReceiverToken(
+      c.req.param("id"),
+      c.req.header("x-receiver-token") ?? "",
+    );
+    return c.json(ReceiverTokenValidationResponseSchema.parse({ valid }));
   });
 
   app.post("/api/sessions/:id/claim", async (c) => {
@@ -157,7 +166,13 @@ export const createApp = (options: CreateAppOptions = {}) => {
         },
         async onMessage(event, ws) {
           if (
-            !(await store.handleSignal(sessionId, role, token, event.data as string | ArrayBuffer))
+            !(await store.handleSignal(
+              sessionId,
+              role,
+              token,
+              event.data as string | ArrayBuffer,
+              ws.raw,
+            ))
           ) {
             ws.close(1003, "invalid signal payload");
           }

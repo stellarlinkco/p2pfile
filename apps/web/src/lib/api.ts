@@ -11,6 +11,7 @@ export {
   releaseSession,
   resolveAccessCode,
   sendEndSessionBeacon,
+  validateReceiverToken,
 } from "./api/runtime";
 export type {
   ClaimSessionResponse,

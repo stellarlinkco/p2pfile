@@ -112,4 +112,6 @@ export type SenderRuntime = {
 export type ReceiverRuntime = {
   stop: () => void;
   release: () => void;
+  isAlive: () => boolean;
+  isEstablished: () => boolean;
 };

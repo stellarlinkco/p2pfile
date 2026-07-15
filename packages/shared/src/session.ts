@@ -224,6 +224,10 @@ export const AccessCodeResolveResponseSchema = z.object({
   sharePath: SharePathSchema,
 });
 
+export const ReceiverTokenValidationResponseSchema = z.object({
+  valid: z.boolean(),
+});
+
 export const AppStatusSchema = z.object({
   ok: z.literal(true),
   service: z.literal("signal"),
@@ -387,6 +391,7 @@ export type CompleteSessionRequest = z.infer<typeof CompleteSessionRequestSchema
 export type EndSessionRequest = z.infer<typeof EndSessionRequestSchema>;
 export type SessionMutationResponse = z.infer<typeof SessionMutationResponseSchema>;
 export type AccessCodeResolveResponse = z.infer<typeof AccessCodeResolveResponseSchema>;
+export type ReceiverTokenValidationResponse = z.infer<typeof ReceiverTokenValidationResponseSchema>;
 export type AppStatus = z.infer<typeof AppStatusSchema>;
 export type SenderHeartbeat = z.infer<typeof SenderHeartbeatSchema>;
 export type ResumeProgress = z.infer<typeof ResumeProgressSchema>;
