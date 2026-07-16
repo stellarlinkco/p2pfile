@@ -38,6 +38,7 @@ import {
   type LiveSessionStoreOptions,
   type StoredSession,
 } from "./session-model";
+import { relaySequenceFromBinaryWire } from "./session-sockets";
 import { isActiveSessionState, markConnecting, markTransferring } from "./session-state";
 import { generateAccessCode, generateSessionId, generateToken } from "./session-tokens";
 import { toPublicSession } from "./session-view";
@@ -347,7 +348,12 @@ export class RedisSessionStore {
       markTransferring(session);
       await this.save(session);
       if (!isCurrentSocket()) return false;
-      this.sockets.sendBinaryToPeer(sessionId, signalRole, rawMessage);
+      if (!this.sockets.sendBinaryToPeer(sessionId, signalRole, rawMessage)) {
+        if (signalRole === "sender") {
+          const sequence = relaySequenceFromBinaryWire(rawMessage);
+          if (sequence !== null) this.sockets.nackRelay(sessionId, "sender", sequence);
+        }
+      }
       return true;
     }
 
@@ -387,7 +393,11 @@ export class RedisSessionStore {
     if (envelope.type === "relay-ready" || envelope.type === "relay-message") {
       markTransferring(session);
     }
-    this.sockets.sendToPeer(sessionId, signalRole, envelope);
+    if (!this.sockets.sendToPeer(sessionId, signalRole, envelope)) {
+      if (signalRole === "sender" && envelope.type === "relay-message") {
+        this.sockets.nackRelay(sessionId, "sender", envelope.payload.sequence);
+      }
+    }
     await this.save(session);
     return true;
   }

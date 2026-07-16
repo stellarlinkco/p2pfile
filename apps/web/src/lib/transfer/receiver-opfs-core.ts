@@ -112,6 +112,11 @@ export class OpfsFileCore {
     return this.durableBytes;
   }
 
+  digestHex() {
+    this.assertOpen();
+    return this.digest.digestHex();
+  }
+
   finalize() {
     this.assertOpen();
     if (this.processedBytes !== this.file.size) {
@@ -121,7 +126,7 @@ export class OpfsFileCore {
     const result = {
       bytes: this.processedBytes,
       durableBytes: this.durableBytes,
-      digest: this.digest.digestHex(),
+      digest: this.digestHex(),
     };
     this.close();
     return result;

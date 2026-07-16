@@ -32,7 +32,14 @@ import {
   type LiveSessionStoreOptions,
   type StoredSession,
 } from "./session-model";
-import { detachSocket, isValidRoleToken, sendToPeer } from "./session-sockets";
+import {
+  detachSocket,
+  isValidRoleToken,
+  nackRelayPeerUnavailable,
+  relaySequenceFromBinaryWire,
+  sendBinaryToPeer,
+  sendToPeer,
+} from "./session-sockets";
 import { isActiveSessionState, markConnecting, markTransferring } from "./session-state";
 import { generateAccessCode, generateSessionId, generateToken } from "./session-tokens";
 import { toPublicSession } from "./session-view";
@@ -286,19 +293,16 @@ export class LiveSessionStore {
     // Opaque binary relay frames (chunk payloads) are forwarded without JSON parsing.
     if (typeof rawMessage !== "string") {
       markTransferring(session);
-      const peerRole: SessionRole = role === "sender" ? "receiver" : "sender";
-      const peerSocket = session.sockets[peerRole];
-      if (!peerSocket) return true;
-      if (rawMessage instanceof ArrayBuffer) {
-        peerSocket.send(rawMessage);
-        return true;
+      if (!sendBinaryToPeer(session, role, rawMessage)) {
+        // Never silently drop: nack so the sender can recover (edge parity).
+        if (role === "sender") {
+          const sequence = relaySequenceFromBinaryWire(rawMessage);
+          if (sequence !== null) {
+            nackRelayPeerUnavailable(session.sockets.sender, sequence);
+          }
+        }
       }
-      if (ArrayBuffer.isView(rawMessage)) {
-        const view = rawMessage as ArrayBufferView;
-        peerSocket.send(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
-        return true;
-      }
-      return false;
+      return true;
     }
 
     const envelope = this.parseSignal(rawMessage);
@@ -334,7 +338,11 @@ export class LiveSessionStore {
     }
     if (envelope.type === "transfer-complete" || envelope.type === "sender-reconnecting")
       return false;
-    sendToPeer(session, role, envelope);
+    if (!sendToPeer(session, role, envelope)) {
+      if (role === "sender" && envelope.type === "relay-message") {
+        nackRelayPeerUnavailable(session.sockets.sender, envelope.payload.sequence);
+      }
+    }
     return true;
   }
   private parseSignal(rawMessage: string) {

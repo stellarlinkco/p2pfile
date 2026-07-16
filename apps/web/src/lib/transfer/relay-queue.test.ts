@@ -179,6 +179,20 @@ test("relay queue nack rejects the matching sequence immediately", async () => {
   await expect(pending).rejects.toThrow("Relay peer unavailable.");
 });
 
+test("peer-unavailable nack fails the entire queue, not only one sequence", async () => {
+  const queue = trackQueue(
+    new RelayMessageQueue(() => undefined, { ackTimeoutMs: 60_000, maxUnacked: 4 }),
+  );
+  const first = queue.send({ type: "complete", totalBytes: 1 });
+  const second = queue.send({ type: "complete", totalBytes: 2 });
+  queue.nack(0, "peer-unavailable");
+  await expect(first).rejects.toThrow("Relay peer unavailable.");
+  await expect(second).rejects.toThrow("Relay peer unavailable.");
+  await expect(queue.send({ type: "complete", totalBytes: 3 })).rejects.toThrow(
+    "Relay peer unavailable.",
+  );
+});
+
 test("relay queue encodes chunks as binary frames by default", async () => {
   const wires: Array<string | ArrayBuffer> = [];
   const queue = trackQueue(

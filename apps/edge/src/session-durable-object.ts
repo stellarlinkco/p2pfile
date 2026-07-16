@@ -391,15 +391,17 @@ export class SessionDurableObject implements DurableObject {
 
     if (wire.kind === "binary") {
       // Opaque binary relay frames (chunk payloads) are forwarded in-flight only.
-      // Never silently drop: a missing delivery path must nack so the sender can recover.
-      if (role === "sender") {
-        const sequence = relaySequenceFromBinaryWire(wire.bytes);
-        if (sequence !== null && !relayPeerReady) {
-          rejectRelay(sequence);
-          return;
-        }
+      // Never silently drop: a missing delivery path must nack so the origin can recover.
+      const sequence = relaySequenceFromBinaryWire(wire.bytes);
+      if (role === "sender" && sequence !== null && !relayPeerReady) {
+        rejectRelay(sequence);
+        return;
       }
-      if (peerOpen) peer.send(wire.bytes);
+      if (!peerOpen) {
+        if (sequence !== null) rejectRelay(sequence);
+        return;
+      }
+      peer.send(wire.bytes);
       return;
     }
 
@@ -431,6 +433,24 @@ export class SessionDurableObject implements DurableObject {
       session.relayReadyGeneration = session.receiverGeneration;
       void this.persistSession(session);
     }
-    if (peerOpen) peer.send(JSON.stringify(envelope));
+    if (!peerOpen) {
+      // Control-plane relay frames (chunk-commit, delivery ack) must not vanish:
+      // nack the origin so its queue can recover instead of waiting 15s.
+      if (
+        envelope.type === "relay-message" ||
+        envelope.type === "relay-ack" ||
+        envelope.type === "relay-nack"
+      ) {
+        const sequence =
+          envelope.type === "relay-message" ||
+          envelope.type === "relay-ack" ||
+          envelope.type === "relay-nack"
+            ? envelope.payload.sequence
+            : null;
+        if (typeof sequence === "number") rejectRelay(sequence);
+      }
+      return;
+    }
+    peer.send(JSON.stringify(envelope));
   }
 }

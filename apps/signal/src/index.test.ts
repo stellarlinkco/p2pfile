@@ -351,6 +351,74 @@ test("receiver websocket cannot forward transfer-complete", () => {
   expect(accepted).toBe(false);
 });
 
+test("sender relay-message is nacked when the receiver socket is unavailable", () => {
+  const store = new LiveSessionStore();
+  const created = store.createSession({
+    manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+  });
+  const claim = store.claimSession(created.sessionId);
+  if (claim?.status !== "claimed") {
+    throw new Error("expected claim");
+  }
+
+  const senderSent: string[] = [];
+  const fakeSender = {
+    send(data: string) {
+      senderSent.push(data);
+    },
+    close() {},
+  } as unknown as import("bun").ServerWebSocket<unknown>;
+  expect(store.connectSocket(created.sessionId, "sender", created.senderToken, fakeSender)).toBe(
+    true,
+  );
+
+  const accepted = store.handleSignal(
+    created.sessionId,
+    "sender",
+    created.senderToken,
+    JSON.stringify({
+      type: "relay-message",
+      payload: { sequence: 35, message: { type: "complete", totalBytes: 1 } },
+    }),
+  );
+
+  expect(accepted).toBe(true);
+  expect(senderSent.map((raw) => JSON.parse(raw))).toEqual([
+    { type: "relay-nack", payload: { sequence: 35, reason: "peer-unavailable" } },
+  ]);
+});
+
+test("sender binary relay frame is nacked when the receiver socket is unavailable", () => {
+  const store = new LiveSessionStore();
+  const created = store.createSession({
+    manifest: [{ id: "file-1", name: "hello.txt", size: 128 }],
+  });
+  const claim = store.claimSession(created.sessionId);
+  if (claim?.status !== "claimed") {
+    throw new Error("expected claim");
+  }
+
+  const senderSent: string[] = [];
+  const fakeSender = {
+    send(data: string) {
+      senderSent.push(data);
+    },
+    close() {},
+  } as unknown as import("bun").ServerWebSocket<unknown>;
+  expect(store.connectSocket(created.sessionId, "sender", created.senderToken, fakeSender)).toBe(
+    true,
+  );
+
+  // magic R, version 1, sequence 36
+  const binary = new Uint8Array([0x52, 0x01, 0, 0, 0, 36, 1, 2, 3]).buffer;
+  const accepted = store.handleSignal(created.sessionId, "sender", created.senderToken, binary);
+
+  expect(accepted).toBe(true);
+  expect(senderSent.map((raw) => JSON.parse(raw))).toEqual([
+    { type: "relay-nack", payload: { sequence: 36, reason: "peer-unavailable" } },
+  ]);
+});
+
 test("complete and end endpoints reject invalid tokens", async () => {
   const { app, body } = await createSession();
   const claimResponse = await app.request(

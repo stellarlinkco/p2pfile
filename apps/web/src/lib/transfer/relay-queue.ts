@@ -149,8 +149,6 @@ export class RelayMessageQueue {
   private resendExpired() {
     if (this.stopped || this.failure) return;
     const now = Date.now();
-    // Head-of-line only: retransmitting every unacked frame each tick amplifies
-    // congestion when delivery ACKs are delayed and maxUnacked is full.
     let oldest: PendingRelayMessage | null = null;
     let oldestSequence: number | null = null;
     for (const [sequence, entry] of this.pending) {
@@ -429,6 +427,12 @@ export class RelayMessageQueue {
   }
 
   nack(sequence: number, reason = "peer-unavailable") {
+    if (reason === "peer-unavailable") {
+      this.nacks += 1;
+      this.rejectPending(new Error("Relay peer unavailable."));
+      return;
+    }
+
     const pending = this.pending.get(sequence);
     if (!pending) {
       return;
@@ -438,11 +442,7 @@ export class RelayMessageQueue {
     clearTimeout(pending.timer);
     this.pendingWireBytes = Math.max(0, this.pendingWireBytes - pending.wireBytes);
     this.nacks += 1;
-    const message =
-      reason === "peer-unavailable"
-        ? "Relay peer unavailable."
-        : `Relay delivery rejected (${reason}).`;
-    pending.reject(new Error(message));
+    pending.reject(new Error(`Relay delivery rejected (${reason}).`));
     this.wakeSendWaiters();
   }
 

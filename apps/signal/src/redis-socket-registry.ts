@@ -41,24 +41,39 @@ export class RedisSocketRegistry {
     return this.sockets.get(sessionId)?.[role] === socket;
   }
 
-  sendToPeer(sessionId: string, fromRole: SessionRole, envelope: SignalEnvelope) {
+  sendToPeer(sessionId: string, fromRole: SessionRole, envelope: SignalEnvelope): boolean {
     const peerRole: SessionRole = fromRole === "sender" ? "receiver" : "sender";
-    this.sockets.get(sessionId)?.[peerRole]?.send(JSON.stringify(envelope));
+    const peer = this.sockets.get(sessionId)?.[peerRole];
+    if (!peer) return false;
+    peer.send(JSON.stringify(envelope));
+    return true;
   }
 
   sendBinaryToPeer(
     sessionId: string,
     fromRole: SessionRole,
     rawMessage: ArrayBuffer | ArrayBufferView,
-  ) {
+  ): boolean {
     const peerRole: SessionRole = fromRole === "sender" ? "receiver" : "sender";
     const peer = this.sockets.get(sessionId)?.[peerRole];
-    if (!peer) return;
+    if (!peer) return false;
     if (rawMessage instanceof ArrayBuffer) {
       peer.send(rawMessage);
-      return;
+      return true;
     }
     const view = rawMessage as ArrayBufferView;
     peer.send(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+    return true;
+  }
+
+  nackRelay(sessionId: string, role: SessionRole, sequence: number) {
+    const socket = this.sockets.get(sessionId)?.[role];
+    if (!socket) return;
+    socket.send(
+      JSON.stringify({
+        type: "relay-nack",
+        payload: { sequence, reason: "peer-unavailable" },
+      }),
+    );
   }
 }

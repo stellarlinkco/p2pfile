@@ -132,17 +132,28 @@ async function handle(command: OpfsWorkerCommand) {
     return;
   }
 
-  const result = current.core.finalize();
+  // Flush and read the File blob while the SyncAccessHandle is still open, then
+  // close. Closing first made some Chromium builds fail getFile() after finalize.
+  current.core.flush();
+  if (current.core.processedBytes !== current.file.size) {
+    throw new Error("OPFS file is incomplete.");
+  }
+  const digest = current.core.digestHex();
   const blob = await current.fileHandle.getFile();
+  const bytes = current.core.processedBytes;
+  const durableBytes = current.core.durableBytes;
+  current.core.close();
+  active = undefined;
   post({
     type: "finalized",
     requestId: command.requestId,
     generation: command.generation,
     fileId: current.file.id,
-    ...result,
+    bytes,
+    durableBytes,
+    digest,
     blob,
   });
-  active = undefined;
 }
 
 scope.addEventListener("message", (event: MessageEvent<OpfsWorkerCommand>) => {

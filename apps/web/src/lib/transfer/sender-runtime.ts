@@ -33,6 +33,16 @@ export function shouldReuseDirectAttempt(
   return pc.signalingState !== "closed" && channel.readyState === "connecting";
 }
 
+/** Bounded recovery cycles for transient relay failures before a hard error. */
+export const MAX_RELAY_RECOVERY_ATTEMPTS = 5;
+
+export function relayRecoveryExhausted(
+  attempts: number,
+  maxAttempts = MAX_RELAY_RECOVERY_ATTEMPTS,
+) {
+  return attempts > maxAttempts;
+}
+
 function openSenderSignalSocket(sessionId: string, senderToken: string) {
   const ws = new WebSocket(getSignalUrl(sessionId, "sender", senderToken));
   // Required for binary relay chunk frames; default "blob" drops them in parseSignalWire.
@@ -66,6 +76,8 @@ export async function startSenderRuntime(
   let stopped = false;
   let completed = false;
   let transferring = false;
+  let relayRecoveryAttempts = 0;
+  let lastReportedCompletedBytes = 0;
   let receiverProgress: ResumeProgress = initialResumeProgress(plan);
   let receiverInstanceId: string | null = null;
   const fallback = new SenderFallbackController(relayOnly, handlers);
@@ -91,6 +103,14 @@ export async function startSenderRuntime(
     pc = null;
     nextChannel?.close();
     nextPc?.close();
+  };
+
+  const noteUsefulProgress = (completedBytes: number) => {
+    if (completedBytes > lastReportedCompletedBytes) {
+      lastReportedCompletedBytes = completedBytes;
+      // Useful progress resets recovery budget.
+      relayRecoveryAttempts = 0;
+    }
   };
 
   const markCompleted = () => {
@@ -122,6 +142,11 @@ export async function startSenderRuntime(
     });
     if (JSON.stringify(normalized) === JSON.stringify(receiverProgress)) return false;
     receiverProgress = normalized;
+    const completedBytes = receiverProgress.files.reduce(
+      (sum, file) => sum + file.committedBytes,
+      0,
+    );
+    noteUsefulProgress(completedBytes);
     reportResumeProgress(plan, receiverProgress, handlers);
     return true;
   };
@@ -134,7 +159,9 @@ export async function startSenderRuntime(
   const activeTransferHandlers = (token: number): SenderRuntimeHandlers => ({
     ...handlers,
     onProgress(nextProgress) {
-      if (currentTransferActive(token)) handlers.onProgress(nextProgress);
+      if (!currentTransferActive(token)) return;
+      noteUsefulProgress(nextProgress.completedBytes);
+      handlers.onProgress(nextProgress);
     },
   });
   const waitForCompletedSessionView = async (token: number) => {
@@ -158,17 +185,21 @@ export async function startSenderRuntime(
     if (stopped || completed) return;
     const message = error instanceof Error ? error.message : "传输失败。";
     if (message === "Transfer restarted.") return;
-    // Receiver replacement, transient signal loss, or a single timed-out relay
-    // frame can close Direct / stall Relay mid-transfer. Fresh receiver-ready /
-    // relay-ready owns recovery instead of a hard terminal failure.
+    // Transient relay faults recover via relay-ready until the budget is exhausted.
     if (isRecoverableTransferError(message)) {
       const wasRelay = fallback.mode === "ws-relay" || message.startsWith("Relay ");
       transferring = false;
       queue.reset();
       if (wasRelay && !stopped && !completed) {
+        relayRecoveryAttempts += 1;
+        if (relayRecoveryExhausted(relayRecoveryAttempts)) {
+          handlers.onError(
+            `Relay transfer failed after ${MAX_RELAY_RECOVERY_ATTEMPTS} reconnect attempts.`,
+          );
+          return;
+        }
         handlers.onStatus("Waiting for peer reconnect");
-        // Receiver stops relay-ready announcements after the first frame.
-        // Re-announce mode so a live peer can restart delivery without a full page reload.
+        // Re-announce mode so a live peer can restart delivery.
         requestRelayReady();
       }
       return;
