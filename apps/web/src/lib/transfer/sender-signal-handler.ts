@@ -1,6 +1,6 @@
 import type { RelayMessageQueue } from "./relay-queue";
 import { fromRelayMessage } from "./relay-runtime";
-import { applyMode, parseSignalBlob, parseSignalWire, sendSignal } from "./runtime-shared";
+import { applyMode, parseSignalBlob, parseSignalWire, trySendSignal } from "./runtime-shared";
 import type { BrowserSignalMessage, SenderRuntimeHandlers } from "./types";
 
 type SenderSignalHandlerContext = {
@@ -93,7 +93,8 @@ export function attachSenderSignalHandler(context: SenderSignalHandlerContext): 
       return;
     }
     if (message.type === "relay-message") {
-      sendSignal(context.ws, {
+      // Delivery ACK is best-effort on a closing socket; commit still applies if present.
+      trySendSignal(context.ws, {
         type: "relay-ack",
         payload: { sequence: message.payload.sequence },
       });

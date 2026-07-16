@@ -20,7 +20,7 @@ import {
   preferRelayInTests,
   receiverResumeProgress,
   relayAvailable,
-  sendSignal,
+  trySendSignal,
 } from "./runtime-shared";
 import type {
   ReceivedFile,
@@ -136,7 +136,7 @@ export async function startReceiverRuntime(
   const currentDurableProgress = () => receiverResumeProgress(state);
 
   const sendReceiverProgress = () => {
-    sendSignal(ws, {
+    trySendSignal(ws, {
       type: "receiver-ready",
       payload: {
         progress: currentDurableProgress(),
@@ -150,8 +150,8 @@ export async function startReceiverRuntime(
     // Progress must arrive first so a reattached relay sender cannot resend
     // from an older acknowledged offset.
     sendReceiverProgress();
-    sendSignal(ws, { type: "mode", payload: { mode: "relay" } });
-    sendSignal(ws, { type: "relay-ready", payload: {} });
+    trySendSignal(ws, { type: "mode", payload: { mode: "relay" } });
+    trySendSignal(ws, { type: "relay-ready", payload: {} });
   };
 
   const stopRelayAnnouncements = () => {
@@ -201,7 +201,9 @@ export async function startReceiverRuntime(
           if (viaRelay || relayRequested) {
             void getRelayCommitQueue()
               .send(ack)
-              .catch(() => undefined);
+              .catch((error) => {
+                if (!stopped) failRuntime(error);
+              });
             return;
           }
           if (dataChannelOpen) {
@@ -211,7 +213,7 @@ export async function startReceiverRuntime(
       });
       if (stopped) return;
       if (message.type === "file-end") {
-        sendSignal(ws, {
+        trySendSignal(ws, {
           type: "receiver-ready",
           payload: {
             progress: currentDurableProgress(),
@@ -331,7 +333,10 @@ export async function startReceiverRuntime(
 
     if (wire.kind === "binary-relay-chunk") {
       stopRelayAnnouncements();
-      sendSignal(ws, { type: "relay-ack", payload: { sequence: wire.sequence } });
+      if (!trySendSignal(ws, { type: "relay-ack", payload: { sequence: wire.sequence } })) {
+        failRuntime(new Error("Relay signaling disconnected."));
+        return;
+      }
       handleRelayMessage(wire.sequence, wire.message);
       return;
     }
@@ -351,7 +356,7 @@ export async function startReceiverRuntime(
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       if (pc.localDescription) {
-        sendSignal(ws, { type: "answer", payload: pc.localDescription.toJSON() });
+        trySendSignal(ws, { type: "answer", payload: pc.localDescription.toJSON() });
       }
       return;
     }
@@ -379,7 +384,15 @@ export async function startReceiverRuntime(
 
     if (message.type === "relay-message") {
       stopRelayAnnouncements();
-      sendSignal(ws, { type: "relay-ack", payload: { sequence: message.payload.sequence } });
+      if (
+        !trySendSignal(ws, {
+          type: "relay-ack",
+          payload: { sequence: message.payload.sequence },
+        })
+      ) {
+        failRuntime(new Error("Relay signaling disconnected."));
+        return;
+      }
       handleRelayMessage(message.payload.sequence, fromRelayMessage(message.payload.message));
       return;
     }

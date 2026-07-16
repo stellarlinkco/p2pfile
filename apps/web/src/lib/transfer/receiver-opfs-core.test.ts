@@ -151,3 +151,115 @@ test("OPFS core rejects a short write without advancing progress", () => {
   expect(core.processedBytes).toBe(0);
   expect(core.durableBytes).toBe(0);
 });
+
+/**
+ * Models Chromium FileSystemSyncAccessHandle exclusive ownership: an op that
+ * starts while another is still "open" (across an await) throws the exact
+ * production error the user reported.
+ */
+class ConcurrentSensitiveHandle extends FakeSyncHandle {
+  private inflight = 0;
+
+  private begin() {
+    if (this.inflight > 0) {
+      throw new DOMException(
+        "An operation that depends on state cached in an interface object was made but the state had changed since it was read from disk.",
+        "InvalidStateError",
+      );
+    }
+    this.inflight += 1;
+  }
+
+  private end() {
+    this.inflight = Math.max(0, this.inflight - 1);
+  }
+
+  /** Async write that stays "open" across a yield — like real OPFS I/O. */
+  async writeAsync(buffer: ArrayBufferView, options?: { at?: number }) {
+    this.begin();
+    try {
+      await Promise.resolve();
+      return super.write(buffer, options);
+    } finally {
+      this.end();
+    }
+  }
+
+  async flushAsync() {
+    this.begin();
+    try {
+      await Promise.resolve();
+      return super.flush();
+    } finally {
+      this.end();
+    }
+  }
+}
+
+/**
+ * Mirrors the production worker bug: `void handle(command)` without a chain
+ * allows a second message to enter while the first still awaits.
+ */
+async function runUnserializedWorkerOps(
+  handle: ConcurrentSensitiveHandle,
+  ops: Array<"write" | "flush">,
+): Promise<Array<PromiseSettledResult<unknown>>> {
+  const tasks: Array<Promise<unknown>> = [];
+  for (const op of ops) {
+    const task: Promise<unknown> =
+      op === "write"
+        ? handle.writeAsync(new Uint8Array(MANIFEST_CHUNK_BYTES), { at: 0 })
+        : handle.flushAsync();
+    // Fire-and-forget like the unserialized worker message listener.
+    tasks.push(task);
+  }
+  return Promise.allSettled(tasks);
+}
+
+async function runSerializedWorkerOps(
+  handle: ConcurrentSensitiveHandle,
+  ops: Array<"write" | "flush">,
+) {
+  let chain: Promise<void> = Promise.resolve();
+  const runExclusive = <T>(op: () => Promise<T>): Promise<T> => {
+    const next = chain.then(op);
+    chain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
+  const results: unknown[] = [];
+  for (const op of ops) {
+    results.push(
+      await runExclusive(async () => {
+        if (op === "write") {
+          return handle.writeAsync(new Uint8Array(MANIFEST_CHUNK_BYTES), { at: 0 });
+        }
+        await handle.flushAsync();
+        return undefined;
+      }),
+    );
+  }
+  return results;
+}
+
+test("unserialized worker-style handle ops surface Chromium cached-state InvalidStateError", async () => {
+  const handle = new ConcurrentSensitiveHandle();
+  const results = await runUnserializedWorkerOps(handle, ["write", "flush"]);
+  const rejected = results.filter((result) => result.status === "rejected");
+  expect(rejected.length).toBeGreaterThanOrEqual(1);
+  const message = rejected
+    .map((result) => (result.status === "rejected" ? String(result.reason) : ""))
+    .join("\n");
+  expect(message).toContain(
+    "An operation that depends on state cached in an interface object was made but the state had changed since it was read from disk.",
+  );
+});
+
+test("serialized worker-style handle ops avoid Chromium cached-state InvalidStateError", async () => {
+  const handle = new ConcurrentSensitiveHandle();
+  await runSerializedWorkerOps(handle, ["write", "flush", "write", "flush"]);
+  expect(handle.writeOffsets.length).toBe(2);
+  expect(handle.flushOffsets.length).toBe(2);
+});

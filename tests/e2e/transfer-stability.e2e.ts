@@ -183,6 +183,171 @@ test.describe("transfer stability coverage", () => {
     }
   });
 
+  test("forced Relayed Transfer completes a medium file past sequence ~35", async ({ page }) => {
+    // 3 MiB / 64 KiB ≈ 48 chunks plus control frames; covers the reported seq-35 hang zone.
+    test.setTimeout(180_000);
+    const consoleErrors: string[] = [];
+    observeConsoleErrors(page, consoleErrors);
+
+    const files = [
+      makeSizedTestFile("forced-relay-medium.zip", 3 * 1024 * 1024, "application/zip"),
+    ];
+    const shareLink = await createSession(page, files, { fallback: false });
+    const receiver = await newReceiverPage(page, { fallback: false });
+    observeConsoleErrors(receiver, consoleErrors);
+    await forceDirectFail(receiver);
+    await forceDirectFail(page);
+
+    try {
+      await openReceiver(receiver, shareLink, files, { fallback: false });
+      await receiver.getByTestId("claim-session-button").click();
+
+      await expect(receiver.getByTestId("mode-disclosure")).toContainText(
+        /Relayed Transfer|中继/i,
+        {
+          timeout: 45_000,
+        },
+      );
+      await expect(page.getByTestId("mode-disclosure")).toContainText(/Relayed Transfer|中继/i, {
+        timeout: 45_000,
+      });
+
+      await expect(
+        receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 150_000 });
+      await expect(
+        page.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 150_000 });
+      await expect(
+        receiver.getByRole("button", {
+          name: `保存 ${files[0]?.name ?? "forced-relay-medium.zip"}`,
+        }),
+      ).toBeVisible();
+
+      const timeoutErrors = consoleErrors.filter((error) =>
+        /Relay acknowledgement timed out/i.test(error),
+      );
+      expect(timeoutErrors, `unexpected relay ack timeouts: ${timeoutErrors.join(" | ")}`).toEqual(
+        [],
+      );
+
+      await writeEvidence("val-stab-relay-medium-dom-trace.json", {
+        assertionId: "VAL-STAB-RELAY-MEDIUM",
+        evidenceSource: "controlled",
+        claim: "C-RELAY-MEDIUM",
+        fileBytes: 3 * 1024 * 1024,
+        approxChunks: Math.ceil((3 * 1024 * 1024) / MANIFEST_CHUNK_BYTES),
+        shareLink,
+        senderMode: await page.getByTestId("mode-disclosure").textContent(),
+        receiverMode: await receiver.getByTestId("mode-disclosure").textContent(),
+        senderStatus: await page.getByTestId("session-status").textContent(),
+        receiverStatus: await receiver.getByTestId("session-status").textContent(),
+        consoleErrors,
+      });
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("forced Relayed Transfer recovers after sender signal drop under latency", async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const consoleErrors: string[] = [];
+    observeConsoleErrors(page, consoleErrors);
+    await installSenderSocketControl(page);
+    await forceDirectFail(page);
+
+    // ~1.5 MiB keeps the run past several pipeline windows without 3-minute timeouts.
+    const files = [makeSizedTestFile("forced-relay-reconnect.zip", 1536 * 1024, "application/zip")];
+    const shareLink = await createSession(page, files, { fallback: false });
+    const receiver = await newReceiverPage(page, { fallback: false });
+    observeConsoleErrors(receiver, consoleErrors);
+    await forceDirectFail(receiver);
+
+    const senderCdp = await applyNetworkDegradation(page, {
+      latencyMs: 120,
+      downloadKbps: 2400,
+      uploadKbps: 2400,
+    });
+    const receiverCdp = await applyNetworkDegradation(receiver, {
+      latencyMs: 120,
+      downloadKbps: 2400,
+      uploadKbps: 2400,
+    });
+
+    try {
+      await openReceiver(receiver, shareLink, files, { fallback: false });
+      await receiver.getByTestId("claim-session-button").click();
+      await expect(receiver.getByTestId("mode-disclosure")).toContainText(
+        /Relayed Transfer|中继/i,
+        {
+          timeout: 45_000,
+        },
+      );
+      await expect(page.getByTestId("mode-disclosure")).toContainText(/Relayed Transfer|中继/i, {
+        timeout: 45_000,
+      });
+      await expect(receiver.getByTestId("session-status")).toContainText(
+        /Receiving|接收|Transfer|Transferring/i,
+        { timeout: 30_000 },
+      );
+
+      // Interrupt sender signaling mid-transfer; recovery should reattach rather than hard-fail.
+      await page.evaluate(() =>
+        (
+          window as unknown as { __P2PFILE_CLOSE_SENDER_SIGNAL__: () => void }
+        ).__P2PFILE_CLOSE_SENDER_SIGNAL__(),
+      );
+
+      await expect
+        .poll(
+          async () => {
+            const senderStatus = (await page.getByTestId("session-status").textContent()) ?? "";
+            const receiverStatus =
+              (await receiver.getByTestId("session-status").textContent()) ?? "";
+            return `${senderStatus}\n${receiverStatus}`;
+          },
+          { timeout: 20_000 },
+        )
+        .toMatch(/Waiting for peer reconnect|reconnecting|重连|Receiving|接收|Transfer/i);
+
+      await expect(page.getByTestId("ended-session-notice")).toHaveCount(0);
+      await expect(receiver.getByTestId("ended-session-notice")).toHaveCount(0);
+
+      await expect(
+        receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 150_000 });
+      await expect(
+        page.getByRole("heading", { level: 3, name: "Completed Session View" }),
+      ).toBeVisible({ timeout: 150_000 });
+
+      const hardFailErrors = consoleErrors.filter((error) =>
+        /Relay acknowledgement timed out|传输失败|Transfer failed/i.test(error),
+      );
+      expect(hardFailErrors, `unexpected hard-fail errors: ${hardFailErrors.join(" | ")}`).toEqual(
+        [],
+      );
+
+      await writeEvidence("val-stab-relay-reconnect-dom-trace.json", {
+        assertionId: "VAL-STAB-RELAY-RECONNECT",
+        evidenceSource: "controlled",
+        claim: "C-RELAY-RECONNECT",
+        fileBytes: 1536 * 1024,
+        shareLink,
+        senderMode: await page.getByTestId("mode-disclosure").textContent(),
+        receiverMode: await receiver.getByTestId("mode-disclosure").textContent(),
+        senderStatus: await page.getByTestId("session-status").textContent(),
+        receiverStatus: await receiver.getByTestId("session-status").textContent(),
+        consoleErrors,
+      });
+    } finally {
+      await clearNetworkDegradation(senderCdp);
+      await clearNetworkDegradation(receiverCdp);
+      await receiver.close();
+    }
+  });
+
   test("sender page close during active transfer shows Sender-Ended Session guidance", async ({
     page,
   }) => {

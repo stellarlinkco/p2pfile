@@ -9,6 +9,8 @@ import {
   handleProtocolMessage,
   makePeerConnection,
   receiverResumeProgress,
+  sendSignal,
+  trySendSignal,
   turnConfigured,
 } from "./runtime-shared";
 import type { BrowserSignalMessage, ReceiverRuntimeHandlers } from "./types";
@@ -770,4 +772,41 @@ test("out-of-order file-start freezes receiver before completion", async () => {
 
   await handleProtocolMessage({ type: "complete", totalBytes: 9 }, state, handlers);
   expect(completeCalls).toBe(0);
+});
+
+test("sendSignal throws when the signal socket is not OPEN", () => {
+  const closed = {
+    readyState: 3,
+    send() {
+      throw new Error("should not send");
+    },
+  } as unknown as WebSocket;
+
+  expect(() => sendSignal(closed, { type: "mode", payload: { mode: "relay" } })).toThrow(
+    "Relay signaling disconnected.",
+  );
+});
+
+test("trySendSignal returns false on closed sockets without throwing", () => {
+  const closed = {
+    readyState: 3,
+    send() {
+      throw new Error("should not send");
+    },
+  } as unknown as WebSocket;
+
+  expect(trySendSignal(closed, { type: "mode", payload: { mode: "relay" } })).toBe(false);
+});
+
+test("trySendSignal forwards open sockets and returns true", () => {
+  const sent: string[] = [];
+  const open = {
+    readyState: 1,
+    send(data: string) {
+      sent.push(data);
+    },
+  } as unknown as WebSocket;
+
+  expect(trySendSignal(open, { type: "mode", payload: { mode: "relay" } })).toBe(true);
+  expect(JSON.parse(sent[0] ?? "{}")).toEqual({ type: "mode", payload: { mode: "relay" } });
 });

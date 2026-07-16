@@ -147,15 +147,31 @@ export class RelayMessageQueue {
   }
 
   private resendExpired() {
+    if (this.stopped || this.failure) return;
     const now = Date.now();
-    for (const entry of this.pending.values()) {
+    // Head-of-line only: retransmitting every unacked frame each tick amplifies
+    // congestion when delivery ACKs are delayed and maxUnacked is full.
+    let oldest: PendingRelayMessage | null = null;
+    let oldestSequence: number | null = null;
+    for (const [sequence, entry] of this.pending) {
       if (now < entry.nextResendAt) continue;
-      entry.attempts += 1;
-      entry.resendDelayMs = Math.min(this.maxRtoMs, entry.resendDelayMs * 2);
-      entry.nextResendAt = now + entry.resendDelayMs;
-      this.applicationResends += 1;
-      this.transmittedWireBytes += entry.wireBytes;
-      this.sendWire(entry.wire);
+      if (!oldest || entry.firstSentAt < oldest.firstSentAt) {
+        oldest = entry;
+        oldestSequence = sequence;
+      }
+    }
+    if (!oldest || oldestSequence === null) return;
+    oldest.attempts += 1;
+    oldest.resendDelayMs = Math.min(this.maxRtoMs, oldest.resendDelayMs * 2);
+    oldest.nextResendAt = now + oldest.resendDelayMs;
+    this.applicationResends += 1;
+    this.transmittedWireBytes += oldest.wireBytes;
+    try {
+      this.sendWire(oldest.wire);
+    } catch (error) {
+      this.rejectPending(
+        error instanceof Error ? error : new Error("Relay signaling disconnected."),
+      );
     }
   }
 
@@ -178,21 +194,23 @@ export class RelayMessageQueue {
       `Relay acknowledgement timed out (sequence ${sequence}, ${pending.messageType}, ${attempts}).`,
     );
   }
+
   private rejectPending(error: Error) {
-    this.failure = error;
+    const root = this.failure ?? error;
+    this.failure = root;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(root);
     }
     this.pending.clear();
     this.pendingWireBytes = 0;
     for (const pending of this.pendingCommits.values()) {
       if (pending.timer) clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(root);
     }
     this.pendingCommits.clear();
     while (this.sendWaiters.length > 0) {
-      this.sendWaiters.shift()?.reject(error);
+      this.sendWaiters.shift()?.reject(root);
     }
   }
 
@@ -280,12 +298,8 @@ export class RelayMessageQueue {
           return;
         }
 
-        this.pending.delete(sequence);
-        clearTimeout(nextPending.timer);
-        this.pendingWireBytes = Math.max(0, this.pendingWireBytes - nextPending.wireBytes);
         this.acknowledgementTimeouts += 1;
-        nextPending.reject(this.acknowledgementTimeoutError(nextPending, sequence));
-        this.wakeSendWaiters();
+        this.rejectPending(this.acknowledgementTimeoutError(nextPending, sequence));
       }, this.ackTimeoutMs),
     };
 
@@ -299,7 +313,15 @@ export class RelayMessageQueue {
       if (commit) commit.startedAt = now;
     }
     this.pending.set(sequence, pending);
-    this.sendWire(wire);
+    try {
+      this.sendWire(wire);
+    } catch (error) {
+      // Keep the entry in `pending` so rejectPending can settle this promise.
+      this.rejectPending(
+        error instanceof Error ? error : new Error("Relay signaling disconnected."),
+      );
+      return promise;
+    }
     return promise;
   }
 

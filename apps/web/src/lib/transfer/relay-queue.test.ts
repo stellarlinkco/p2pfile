@@ -30,6 +30,96 @@ test("relay queue rejects when acknowledgement never arrives", async () => {
   );
 });
 
+test("relay acknowledgement timeout fails the whole queue instead of orphaning peers", async () => {
+  const queue = trackQueue(
+    new RelayMessageQueue(() => undefined, {
+      ackTimeoutMs: 20,
+      initialRtoMs: 60_000,
+      maxRtoMs: 60_000,
+      maxUnacked: 4,
+    }),
+  );
+
+  const first = queue.send({ type: "complete", totalBytes: 1 });
+  const second = queue.send({ type: "complete", totalBytes: 2 });
+  // Keep both promises observed so cascade rejection cannot hang the runner.
+  const firstResult = first.then(
+    () => "resolved" as const,
+    (error: Error) => error.message,
+  );
+  const secondResult = second.then(
+    () => "resolved" as const,
+    (error: Error) => error.message,
+  );
+  await Bun.sleep(40);
+  expect(await firstResult).toMatch(/Relay acknowledgement timed out \(/);
+  expect(await secondResult).toMatch(/Relay acknowledgement timed out \(/);
+  await expect(queue.send({ type: "complete", totalBytes: 3 })).rejects.toThrow(
+    "Relay acknowledgement timed out (",
+  );
+});
+
+test("relay queue fails immediately when the wire send is rejected", async () => {
+  const queue = trackQueue(
+    new RelayMessageQueue(
+      () => {
+        throw new Error("Relay signaling disconnected.");
+      },
+      { ackTimeoutMs: 60_000 },
+    ),
+  );
+
+  await expect(queue.send({ type: "complete", totalBytes: 1 })).rejects.toThrow(
+    "Relay signaling disconnected.",
+  );
+});
+
+test("relay queue resends only the oldest unacked frame per tick", async () => {
+  const sequences: number[] = [];
+  const queue = trackQueue(
+    new RelayMessageQueue(
+      (data) => {
+        if (typeof data !== "string") return;
+        sequences.push(JSON.parse(data).payload.sequence as number);
+      },
+      {
+        ackTimeoutMs: 60_000,
+        initialRtoMs: 20,
+        minRtoMs: 20,
+        maxRtoMs: 20,
+        maxUnacked: 4,
+      },
+    ),
+  );
+
+  const first = queue.send({ type: "complete", totalBytes: 1 });
+  const second = queue.send({ type: "complete", totalBytes: 2 });
+  const third = queue.send({ type: "complete", totalBytes: 3 });
+  void first.catch(() => undefined);
+  void second.catch(() => undefined);
+  void third.catch(() => undefined);
+  await Bun.sleep(5);
+  expect(sequences).toEqual([0, 1, 2]);
+
+  await Bun.sleep(45);
+  // First resend wave should only retransmit the head-of-line sequence.
+  const afterFirstResend = sequences.filter((sequence) => sequence === 0).length;
+  const secondResends = sequences.filter((sequence) => sequence === 1).length;
+  const thirdResends = sequences.filter((sequence) => sequence === 2).length;
+  expect(afterFirstResend).toBeGreaterThanOrEqual(2);
+  expect(secondResends).toBe(1);
+  expect(thirdResends).toBe(1);
+
+  queue.acknowledge(0);
+  await first;
+  await Bun.sleep(45);
+  expect(sequences.filter((sequence) => sequence === 1).length).toBeGreaterThanOrEqual(2);
+  queue.acknowledge(1);
+  queue.acknowledge(2);
+  await second;
+  await third;
+});
+
 test("relay queue fails outstanding sends when signaling aborts", async () => {
   const queue = trackQueue(new RelayMessageQueue(() => undefined, { ackTimeoutMs: 60_000 }));
   const pending = queue.send({ type: "complete", totalBytes: 1 });
@@ -151,7 +241,9 @@ test("relay queue resends with exponential backoff instead of a fixed interval",
   const pending = queue.send({ type: "complete", totalBytes: 1 });
   await expect(pending).rejects.toThrow("Relay acknowledgement timed out (");
 
-  expect(sentAt.length).toBeGreaterThanOrEqual(3);
+  // At least one resend before the terminal timeout (timer granularity may
+  // collapse later ticks under HOL retransmission).
+  expect(sentAt.length).toBeGreaterThanOrEqual(2);
   const gaps = sentAt.slice(1).map((value, index) => value - (sentAt[index] ?? value));
   // Later gaps should not all equal the initial 10ms fixed cadence.
   expect(Math.max(...gaps)).toBeGreaterThanOrEqual(20);

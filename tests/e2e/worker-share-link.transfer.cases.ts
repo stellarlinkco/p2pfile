@@ -10,6 +10,12 @@ import {
   waitForCompletedSession,
 } from "./p2p-file-v1.support";
 import {
+  applyNetworkDegradation,
+  clearNetworkDegradation,
+  observeConsoleErrors,
+} from "./transfer-stability.support";
+import {
+  installSenderSocketControl,
   observeApiRequests,
   observeWebSockets,
   writeEvidence,
@@ -244,6 +250,194 @@ test("Worker Relayed Transfer completes a large zip file over WebSockets", async
       receiverModeDisclosure: await receiver.getByTestId("mode-disclosure").textContent(),
     });
   } finally {
+    await receiver.close();
+  }
+});
+
+test("Worker Relayed Transfer completes a medium file past sequence ~35", async ({ page }) => {
+  // 3 MiB / 64 KiB ≈ 48 chunks; covers the reported seq-35 hang zone on Cloudflare edge.
+  test.setTimeout(180_000);
+  const consoleErrors: string[] = [];
+  const apiRequests: string[] = [];
+  const websocketRequests: string[] = [];
+  observeConsoleErrors(page, consoleErrors);
+  observeApiRequests(page, apiRequests);
+  observeWebSockets(page, websocketRequests);
+  await forceDirectFail(page);
+
+  const files = [
+    makeSizedTestFile("worker-forced-relay-medium.zip", 3 * 1024 * 1024, "application/zip"),
+  ];
+  const shareLink = await createSession(page, files, { fallback: false });
+  const receiver = await page.context().newPage();
+  observeConsoleErrors(receiver, consoleErrors);
+  observeApiRequests(receiver, apiRequests);
+  observeWebSockets(receiver, websocketRequests);
+  await forceDirectFail(receiver);
+
+  try {
+    await openReceiver(receiver, shareLink, files, { fallback: false });
+    await receiver.getByTestId("claim-session-button").click();
+
+    await expect(receiver.getByTestId("mode-disclosure")).toContainText(/Relayed Transfer/i, {
+      timeout: 45_000,
+    });
+    await expect(page.getByTestId("mode-disclosure")).toContainText(/Relayed Transfer/i, {
+      timeout: 45_000,
+    });
+    await expect(
+      receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
+    ).toBeVisible({ timeout: 150_000 });
+    await expect(
+      page.getByRole("heading", { level: 3, name: "Completed Session View" }),
+    ).toBeVisible({ timeout: 150_000 });
+    await expect(
+      receiver.getByRole("button", {
+        name: `保存 ${files[0]?.name ?? "worker-forced-relay-medium.zip"}`,
+      }),
+    ).toBeVisible();
+
+    const timeoutErrors = consoleErrors.filter((error) =>
+      /Relay acknowledgement timed out/i.test(error),
+    );
+    expect(timeoutErrors, `unexpected relay ack timeouts: ${timeoutErrors.join(" | ")}`).toEqual(
+      [],
+    );
+
+    await writeEvidence("val-cf-relay-medium-dom-trace.json", {
+      assertionId: "VAL-CF-RELAY-MEDIUM",
+      evidenceSource: "controlled",
+      claim: "C-CF-RELAY-MEDIUM",
+      fileBytes: 3 * 1024 * 1024,
+      approxChunks: Math.ceil((3 * 1024 * 1024) / MANIFEST_CHUNK_BYTES),
+      shareLink,
+      senderMode: await page.getByTestId("mode-disclosure").textContent(),
+      receiverMode: await receiver.getByTestId("mode-disclosure").textContent(),
+      senderStatus: await page.getByTestId("session-status").textContent(),
+      receiverStatus: await receiver.getByTestId("session-status").textContent(),
+      websocketRequests: websocketRequests.filter((url) => url.includes("/ws/")),
+      consoleErrors,
+    });
+  } finally {
+    await receiver.close();
+  }
+});
+
+test("Worker Relayed Transfer recovers after sender signal drop under latency", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const consoleErrors: string[] = [];
+  const apiRequests: string[] = [];
+  const websocketRequests: string[] = [];
+  observeConsoleErrors(page, consoleErrors);
+  observeApiRequests(page, apiRequests);
+  observeWebSockets(page, websocketRequests);
+  await installSenderSocketControl(page);
+  await forceDirectFail(page);
+
+  const files = [
+    makeSizedTestFile("worker-forced-relay-reconnect.zip", 1536 * 1024, "application/zip"),
+  ];
+  const shareLink = await createSession(page, files, { fallback: false });
+  const receiver = await page.context().newPage();
+  observeConsoleErrors(receiver, consoleErrors);
+  observeApiRequests(receiver, apiRequests);
+  observeWebSockets(receiver, websocketRequests);
+  await forceDirectFail(receiver);
+
+  const senderCdp = await applyNetworkDegradation(page, {
+    latencyMs: 120,
+    downloadKbps: 2400,
+    uploadKbps: 2400,
+  });
+  const receiverCdp = await applyNetworkDegradation(receiver, {
+    latencyMs: 120,
+    downloadKbps: 2400,
+    uploadKbps: 2400,
+  });
+
+  try {
+    await openReceiver(receiver, shareLink, files, { fallback: false });
+    await receiver.getByTestId("claim-session-button").click();
+    await expect(receiver.getByTestId("mode-disclosure")).toContainText(/Relayed Transfer/i, {
+      timeout: 45_000,
+    });
+    await expect(page.getByTestId("mode-disclosure")).toContainText(/Relayed Transfer/i, {
+      timeout: 45_000,
+    });
+    await expect(receiver.getByTestId("session-status")).toContainText(
+      /Receiving|接收|Transfer|Transferring/i,
+      { timeout: 30_000 },
+    );
+
+    await page.evaluate(() =>
+      (
+        window as unknown as { __P2PFILE_CLOSE_SENDER_SIGNAL__: () => void }
+      ).__P2PFILE_CLOSE_SENDER_SIGNAL__(),
+    );
+
+    await expect
+      .poll(
+        async () => {
+          const senderStatus = (await page.getByTestId("session-status").textContent()) ?? "";
+          const receiverStatus = (await receiver.getByTestId("session-status").textContent()) ?? "";
+          return `${senderStatus}\n${receiverStatus}`;
+        },
+        { timeout: 20_000 },
+      )
+      .toMatch(/Waiting for peer reconnect|reconnecting|重连|Receiving|接收|Transfer/i);
+
+    await expect(page.getByTestId("ended-session-notice")).toHaveCount(0);
+    await expect(receiver.getByTestId("ended-session-notice")).toHaveCount(0);
+
+    await expect(
+      receiver.getByRole("heading", { level: 3, name: "Completed Session View" }),
+    ).toBeVisible({ timeout: 150_000 });
+    await expect(
+      page.getByRole("heading", { level: 3, name: "Completed Session View" }),
+    ).toBeVisible({ timeout: 150_000 });
+
+    const hardFailErrors = consoleErrors.filter((error) =>
+      /Relay acknowledgement timed out|传输失败|Transfer failed/i.test(error),
+    );
+    expect(hardFailErrors, `unexpected hard-fail errors: ${hardFailErrors.join(" | ")}`).toEqual(
+      [],
+    );
+    // Controlled sender signal drop intentionally surfaces transport disconnects.
+    const expectedRecoveryNoise = consoleErrors.filter((error) =>
+      /Relay signaling disconnected/i.test(error),
+    );
+    const unexpectedConsoleErrors = consoleErrors.filter(
+      (error) => !/Relay signaling disconnected/i.test(error),
+    );
+    expect(
+      unexpectedConsoleErrors,
+      `unexpected console errors: ${unexpectedConsoleErrors.join(" | ")}`,
+    ).toEqual([]);
+    const signalSockets = websocketRequests.filter((url) => url.includes("/ws/"));
+    expect(signalSockets.filter((url) => url.includes("/sender/")).length).toBeGreaterThanOrEqual(
+      2,
+    );
+
+    await writeEvidence("val-cf-relay-reconnect-dom-trace.json", {
+      assertionId: "VAL-CF-RELAY-RECONNECT",
+      evidenceSource: "controlled",
+      claim: "C-CF-RELAY-RECONNECT",
+      fileBytes: 1536 * 1024,
+      shareLink,
+      senderMode: await page.getByTestId("mode-disclosure").textContent(),
+      receiverMode: await receiver.getByTestId("mode-disclosure").textContent(),
+      senderStatus: await page.getByTestId("session-status").textContent(),
+      receiverStatus: await receiver.getByTestId("session-status").textContent(),
+      websocketRequests: signalSockets,
+      expectedRecoveryNoiseCount: expectedRecoveryNoise.length,
+      unexpectedConsoleErrors,
+      consoleErrors,
+    });
+  } finally {
+    await clearNetworkDegradation(senderCdp);
+    await clearNetworkDegradation(receiverCdp);
     await receiver.close();
   }
 });

@@ -7,6 +7,7 @@ import {
   makePeerConnection,
   preferRelayInTests,
   sendSignal,
+  trySendSignal,
 } from "./runtime-shared";
 import { SenderFallbackController } from "./sender-fallback";
 import {
@@ -49,7 +50,19 @@ export async function startSenderRuntime(
   let ws = openSenderSignalSocket(sessionId, senderToken);
   const relayOnly = preferRelayInTests();
   const plan = buildTransferPlan(files, manifest);
-  const queue = new RelayMessageQueue((data) => sendSignal(ws, data));
+  const testAckTimeoutMs = (globalThis as { __P2PFILE_TEST_RELAY_ACK_TIMEOUT_MS__?: number })
+    .__P2PFILE_TEST_RELAY_ACK_TIMEOUT_MS__;
+  const queue = new RelayMessageQueue(
+    (data) => sendSignal(ws, data),
+    typeof testAckTimeoutMs === "number" && testAckTimeoutMs > 0
+      ? {
+          ackTimeoutMs: testAckTimeoutMs,
+          // Keep resend out of the short test window so timeout is the first signal.
+          initialRtoMs: Math.max(testAckTimeoutMs * 4, 60_000),
+          maxRtoMs: Math.max(testAckTimeoutMs * 4, 60_000),
+        }
+      : undefined,
+  );
   let stopped = false;
   let completed = false;
   let transferring = false;
@@ -135,15 +148,29 @@ export async function startSenderRuntime(
     }
   };
 
+  const isRecoverableTransferError = (message: string) =>
+    message === "Data channel is not open." ||
+    message === "Relay peer unavailable." ||
+    message === "Relay signaling disconnected." ||
+    message.startsWith("Relay acknowledgement timed out");
+
   const handleTransferFailure = (error: unknown) => {
     if (stopped || completed) return;
     const message = error instanceof Error ? error.message : "传输失败。";
     if (message === "Transfer restarted.") return;
-    // Receiver replacement can close Direct or temporarily invalidate Relay
-    // while a send is in flight. Fresh receiver-ready/relay-ready owns recovery.
-    if (message === "Data channel is not open." || message === "Relay peer unavailable.") {
+    // Receiver replacement, transient signal loss, or a single timed-out relay
+    // frame can close Direct / stall Relay mid-transfer. Fresh receiver-ready /
+    // relay-ready owns recovery instead of a hard terminal failure.
+    if (isRecoverableTransferError(message)) {
+      const wasRelay = fallback.mode === "ws-relay" || message.startsWith("Relay ");
       transferring = false;
       queue.reset();
+      if (wasRelay && !stopped && !completed) {
+        handlers.onStatus("Waiting for peer reconnect");
+        // Receiver stops relay-ready announcements after the first frame.
+        // Re-announce mode so a live peer can restart delivery without a full page reload.
+        requestRelayReady();
+      }
       return;
     }
     transferring = false;
@@ -179,7 +206,7 @@ export async function startSenderRuntime(
   };
 
   const requestRelayReady = () => {
-    fallback.startRelayMode(() => sendSignal(ws, { type: "mode", payload: { mode: "relay" } }));
+    fallback.startRelayMode(() => trySendSignal(ws, { type: "mode", payload: { mode: "relay" } }));
   };
 
   const continueFallback = () => {
@@ -217,7 +244,7 @@ export async function startSenderRuntime(
     } catch (error) {
       if (
         error instanceof Error &&
-        (error.message === "Transfer restarted." || error.message === "Relay peer unavailable.")
+        (error.message === "Transfer restarted." || isRecoverableTransferError(error.message))
       ) {
         handleTransferFailure(error);
         return;
@@ -234,7 +261,7 @@ export async function startSenderRuntime(
       await nextPc.setLocalDescription(offer);
       if (stopped || completed || pc !== nextPc) return;
       if (nextPc.localDescription) {
-        sendSignal(ws, { type: "offer", payload: nextPc.localDescription.toJSON() });
+        trySendSignal(ws, { type: "offer", payload: nextPc.localDescription.toJSON() });
       }
     } catch (error) {
       if (stopped || completed || pc !== nextPc) return;
@@ -288,7 +315,7 @@ export async function startSenderRuntime(
   const resendPendingOffer = () => {
     if (!pc || pc.signalingState === "closed" || channel?.readyState === "open") return;
     if (pc.localDescription && pc.remoteDescription === null) {
-      sendSignal(ws, { type: "offer", payload: pc.localDescription.toJSON() });
+      trySendSignal(ws, { type: "offer", payload: pc.localDescription.toJSON() });
       return;
     }
     void sendOffer(pc);
@@ -430,7 +457,7 @@ export async function startSenderRuntime(
       ws.close();
     },
     markSenderLeft() {
-      sendSignal(ws, { type: "sender-left", payload: {} });
+      trySendSignal(ws, { type: "sender-left", payload: {} });
       stopped = true;
       transferring = false;
       ws.close();

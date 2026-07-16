@@ -60,6 +60,8 @@ export class OpfsWorkerClient implements LargeFileSinkBackend {
   private failure: Error | null = null;
   private nextRequestId = 1;
   private stopped = false;
+  /** Main-thread chain so timer flush cannot race an in-flight write/finalize. */
+  private operationChain: Promise<void> = Promise.resolve();
   committedBytes = 0;
   durableBytes = 0;
 
@@ -95,72 +97,80 @@ export class OpfsWorkerClient implements LargeFileSinkBackend {
   }
 
   async restore(durableBytes: number) {
-    await this.ready;
-    const response = await this.request({
-      type: "restore",
-      requestId: this.takeRequestId(),
-      generation: this.generation,
-      fileId: this.file.id,
-      durableBytes,
-    });
-    this.applyProgress(response);
-    return this.durableBytes;
-  }
-
-  async write(chunkIndex: number, offset: number, bytes: ArrayBuffer) {
-    await this.ready;
-    const response = await this.request(
-      {
-        type: "write",
+    return this.runExclusive(async () => {
+      await this.ready;
+      const response = await this.request({
+        type: "restore",
         requestId: this.takeRequestId(),
         generation: this.generation,
         fileId: this.file.id,
-        chunkIndex,
-        offset,
-        bytes,
-      },
-      [bytes],
-    );
-    this.applyProgress(response);
-    if (this.durableBytes >= this.committedBytes) {
-      this.clearCheckpointTimer();
-    } else {
-      this.checkpointTimer ??= setTimeout(() => {
-        this.checkpointTimer = null;
-        void this.flush("timer").catch((error: Error) => this.stopWithFailure(error));
-      }, CHECKPOINT_INTERVAL_MS);
-    }
+        durableBytes,
+      });
+      this.applyProgress(response);
+      return this.durableBytes;
+    });
+  }
+
+  async write(chunkIndex: number, offset: number, bytes: ArrayBuffer) {
+    return this.runExclusive(async () => {
+      await this.ready;
+      const response = await this.request(
+        {
+          type: "write",
+          requestId: this.takeRequestId(),
+          generation: this.generation,
+          fileId: this.file.id,
+          chunkIndex,
+          offset,
+          bytes,
+        },
+        [bytes],
+      );
+      this.applyProgress(response);
+      if (this.durableBytes >= this.committedBytes) {
+        this.clearCheckpointTimer();
+      } else {
+        this.armCheckpointTimer();
+      }
+    });
   }
 
   async finalize() {
-    await this.ready;
-    this.clearCheckpointTimer();
-    const response = await this.request({
-      type: "finalize",
-      requestId: this.takeRequestId(),
-      generation: this.generation,
-      fileId: this.file.id,
+    return this.runExclusive(async () => {
+      await this.ready;
+      this.clearCheckpointTimer();
+      // Drain any unflushed processed bytes before finalize so EOF durability
+      // does not race a pending timer flush posted earlier.
+      if (this.durableBytes < this.committedBytes) {
+        await this.flushUnlocked("eof");
+      }
+      const response = await this.request({
+        type: "finalize",
+        requestId: this.takeRequestId(),
+        generation: this.generation,
+        fileId: this.file.id,
+      });
+      if (response.type !== "finalized") {
+        throw new Error("Large-file storage returned an invalid finalization response.");
+      }
+      const previousDurableBytes = this.durableBytes;
+      this.committedBytes = response.bytes;
+      this.durableBytes = response.durableBytes;
+      if (this.durableBytes > previousDurableBytes) {
+        this.onDurableProgress?.(this.durableBytes);
+      }
+      this.detach();
+      return {
+        file: {
+          id: this.file.id,
+          name: this.file.name,
+          size: this.file.size,
+          blob: response.blob,
+          url: URL.createObjectURL(response.blob),
+        },
+        digest: response.digest,
+      };
     });
-    if (response.type !== "finalized") {
-      throw new Error("Large-file storage returned an invalid finalization response.");
-    }
-    const previousDurableBytes = this.durableBytes;
-    this.committedBytes = response.bytes;
-    this.durableBytes = response.durableBytes;
-    if (this.durableBytes > previousDurableBytes) {
-      this.onDurableProgress?.(this.durableBytes);
-    }
-    this.detach();
-    return {
-      file: {
-        id: this.file.id,
-        name: this.file.name,
-        size: this.file.size,
-        blob: response.blob,
-        url: URL.createObjectURL(response.blob),
-      },
-      digest: response.digest,
-    };
   }
 
   reset() {
@@ -169,8 +179,18 @@ export class OpfsWorkerClient implements LargeFileSinkBackend {
     this.detach();
   }
 
-  private async flush(reason: "timer" | "eof") {
-    if (this.stopped || this.durableBytes >= this.committedBytes) return;
+  private armCheckpointTimer() {
+    if (this.checkpointTimer || this.stopped) return;
+    this.checkpointTimer = setTimeout(() => {
+      this.checkpointTimer = null;
+      void this.runExclusive(async () => {
+        await this.flushUnlocked("timer");
+      }).catch((error: Error) => this.stopWithFailure(error));
+    }, CHECKPOINT_INTERVAL_MS);
+  }
+
+  private async flushUnlocked(reason: "timer" | "eof") {
+    if (this.stopped || this.failure || this.durableBytes >= this.committedBytes) return;
     const response = await this.request({
       type: "flush",
       requestId: this.takeRequestId(),
@@ -179,6 +199,15 @@ export class OpfsWorkerClient implements LargeFileSinkBackend {
       reason,
     });
     this.applyProgress(response);
+  }
+
+  private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.operationChain.catch(() => undefined).then(operation);
+    this.operationChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   private applyProgress(response: OpfsWorkerResponse) {

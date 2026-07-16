@@ -343,6 +343,68 @@ test("SessionObject nacks binary relay when the peer socket is unavailable", asy
   ]);
 });
 
+test("SessionObject nacks sender relay when the receiver socket is not OPEN", async () => {
+  resetEdgeSessionsForTests();
+  const env = createEnv(createDurableObjects());
+  const pairs = installFakeWebSocketPair();
+  const { body: created } = await createSession(env);
+  const session = CreateSessionResponseSchema.parse(created);
+  const claim = await claimReceiver(env, session.sessionId);
+
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/sender/${session.senderToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+  expect(
+    (
+      await handleRequest(
+        websocketRequest(`/ws/${session.sessionId}/receiver/${claim.receiverToken}`),
+        env,
+      )
+    ).status,
+  ).toBe(101);
+
+  const sender = pairs[0]?.client;
+  const receiver = pairs[1]?.client;
+  const receiverServer = pairs[1]?.server;
+  if (!sender || !receiver || !receiverServer) {
+    throw new Error("expected sender and receiver sockets");
+  }
+  receiver.send(JSON.stringify({ type: "relay-ready", payload: {} }));
+  sender.received.length = 0;
+
+  // The Durable Object holds the server socket. Mark that peer not OPEN so a
+  // silent drop would hide loss while the socket remains registered.
+  receiverServer.readyState = 2; // CLOSING
+
+  sender.send(
+    JSON.stringify({
+      type: "relay-message",
+      payload: { sequence: 35, message: { type: "complete", totalBytes: 1 } },
+    }),
+  );
+  expect(sender.received.map((message) => JSON.parse(String(message)))).toEqual([
+    { type: "relay-nack", payload: { sequence: 35, reason: "peer-unavailable" } },
+  ]);
+  expect(receiver.received).not.toContainEqual(
+    JSON.stringify({
+      type: "relay-message",
+      payload: { sequence: 35, message: { type: "complete", totalBytes: 1 } },
+    }),
+  );
+
+  const binary = new Uint8Array([0x52, 0x01, 0, 0, 0, 36, 1, 2, 3]).buffer;
+  pairs[0]?.server.dispatchEvent(new MessageEvent("message", { data: binary }));
+  expect(sender.received.map((message) => JSON.parse(String(message))).at(-1)).toEqual({
+    type: "relay-nack",
+    payload: { sequence: 36, reason: "peer-unavailable" },
+  });
+});
+
 test("SessionObject forwards receiver relay chunk-commit separately from relay delivery ack", async () => {
   const storageMutations: StorageMutation[] = [];
   const env = createEnv(createDurableObjectsWithStorageTrace(storageMutations));

@@ -213,16 +213,29 @@ class FakeWebSocket {
     );
   }
 }
-
 type SenderHarness = {
   handlers: SenderRuntimeHandlers;
   modes: string[];
   errors: string[];
+  statuses: string[];
   socket: () => FakeWebSocket;
   peer: (index: number) => FakePeerConnection;
   settle: () => Promise<void>;
 };
 
+async function withRelayOnlyWindow(run: () => Promise<void>) {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { __P2PFILE_TEST_FALLBACK__: true, location: { origin: "http://localhost" } },
+  });
+  try {
+    await run();
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+}
 async function withSenderHarness(
   turnUrl: string | undefined,
   run: (harness: SenderHarness) => Promise<void>,
@@ -230,11 +243,8 @@ async function withSenderHarness(
   const previousTurnUrl = process.env.VITE_TURN_URL;
   const previousPeerConnection = globalThis.RTCPeerConnection;
   const previousWebSocket = globalThis.WebSocket;
-  if (turnUrl === undefined) {
-    delete process.env.VITE_TURN_URL;
-  } else {
-    process.env.VITE_TURN_URL = turnUrl;
-  }
+  if (turnUrl === undefined) delete process.env.VITE_TURN_URL;
+  else process.env.VITE_TURN_URL = turnUrl;
   FakePeerConnection.instances = [];
   FakeWebSocket.instances = [];
   globalThis.RTCPeerConnection = FakePeerConnection as unknown as typeof RTCPeerConnection;
@@ -242,8 +252,11 @@ async function withSenderHarness(
 
   const modes: string[] = [];
   const errors: string[] = [];
+  const statuses: string[] = [];
   const handlers: SenderRuntimeHandlers = {
-    onStatus() {},
+    onStatus(status) {
+      statuses.push(status);
+    },
     onMode(mode) {
       modes.push(mode);
     },
@@ -259,6 +272,7 @@ async function withSenderHarness(
       handlers,
       modes,
       errors,
+      statuses,
       socket: () => {
         const socket = FakeWebSocket.instances[0];
         if (!socket) throw new Error("Signal socket was not created.");
@@ -270,20 +284,15 @@ async function withSenderHarness(
         return peer;
       },
       settle: async () => {
-        for (let i = 0; i < 5; i += 1) {
-          await Promise.resolve();
-        }
+        for (let i = 0; i < 5; i += 1) await Promise.resolve();
         await Bun.sleep(0);
       },
     });
   } finally {
     globalThis.RTCPeerConnection = previousPeerConnection;
     globalThis.WebSocket = previousWebSocket;
-    if (previousTurnUrl === undefined) {
-      delete process.env.VITE_TURN_URL;
-    } else {
-      process.env.VITE_TURN_URL = previousTurnUrl;
-    }
+    if (previousTurnUrl === undefined) delete process.env.VITE_TURN_URL;
+    else process.env.VITE_TURN_URL = previousTurnUrl;
   }
 }
 
@@ -501,6 +510,51 @@ test("receiver replacement nack waits for fresh relay readiness", async () => {
   });
 });
 
+test("relay acknowledgement timeout re-requests relay readiness instead of hard-failing", async () => {
+  const target = globalThis as { __P2PFILE_TEST_RELAY_ACK_TIMEOUT_MS__?: number };
+  const previousAckTimeout = target.__P2PFILE_TEST_RELAY_ACK_TIMEOUT_MS__;
+  target.__P2PFILE_TEST_RELAY_ACK_TIMEOUT_MS__ = 40;
+  try {
+    await withRelayOnlyWindow(async () => {
+      await withSenderHarness(undefined, async ({ handlers, errors, statuses, socket, settle }) => {
+        const file = new File([new Uint8Array(MANIFEST_CHUNK_BYTES + 1)], "timeout.bin");
+        const manifest = [{ id: "file-1", name: file.name, size: file.size, mimeType: file.type }];
+        const runtime = await startSenderRuntime(
+          "session-relay-ack-timeout",
+          "sender-token",
+          [file],
+          manifest,
+          handlers,
+        );
+        await settle();
+        socket().receive({ type: "relay-ready", payload: {} });
+        await settle();
+        const sentBeforeTimeout = socket().relayMessageCount();
+        expect(sentBeforeTimeout).toBeGreaterThan(0);
+        await Bun.sleep(80);
+        await settle();
+        expect(errors).toEqual([]);
+        expect(statuses).toContain("Waiting for peer reconnect");
+        expect(
+          socket().sent.some(
+            (message) =>
+              typeof message !== "string" &&
+              !(message instanceof ArrayBuffer) &&
+              message.type === "mode",
+          ),
+        ).toBe(true);
+        socket().receive({ type: "relay-ready", payload: {} });
+        await settle();
+        expect(socket().relayMessageCount()).toBeGreaterThan(sentBeforeTimeout);
+        runtime.stop();
+      });
+    });
+  } finally {
+    if (previousAckTimeout === undefined) delete target.__P2PFILE_TEST_RELAY_ACK_TIMEOUT_MS__;
+    else target.__P2PFILE_TEST_RELAY_ACK_TIMEOUT_MS__ = previousAckTimeout;
+  }
+});
+
 test("accidental signal socket close reattaches sender with the same token", async () => {
   await withSenderHarness(undefined, async ({ settle }) => {
     const runtime = await startSenderRuntime("session-reconnect", "sender-token", [], [], {
@@ -639,8 +693,7 @@ test("data channel close during a zip send waits for receiver-ready instead of w
     await Bun.sleep(20);
     await settle();
 
-    // Receiver reload closes the DataChannel mid-send. That must not force WS relay;
-    // recovery is owned by the next receiver-ready / ICE failure path.
+    // DataChannel close mid-send must not force WS relay.
     expect(socket().relayMessageCount()).toBe(0);
     expect(errors).toEqual([]);
 
@@ -669,13 +722,7 @@ test("data channel close during a zip send waits for receiver-ready instead of w
   });
 });
 test("relay signal reconnect waits for fresh receiver progress before resending", async () => {
-  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: { __P2PFILE_TEST_FALLBACK__: true, location: { origin: "http://localhost" } },
-  });
-
-  try {
+  await withRelayOnlyWindow(async () => {
     await withSenderHarness(undefined, async ({ handlers, settle }) => {
       const file = new File([new Uint8Array(MANIFEST_CHUNK_BYTES * 2)], "large.zip", {
         type: "application/zip",
@@ -689,7 +736,6 @@ test("relay signal reconnect waits for fresh receiver progress before resending"
         handlers,
       );
       await settle();
-
       const firstSocket = FakeWebSocket.instances[0];
       if (!firstSocket) throw new Error("Expected initial signal socket.");
       firstSocket.receive({
@@ -713,32 +759,18 @@ test("relay signal reconnect waits for fresh receiver progress before resending"
       firstSocket.receive({ type: "relay-ready", payload: {} });
       await settle();
       expect(firstSocket.relayMessageCount()).toBeGreaterThan(0);
-
       firstSocket.close();
       await settle();
       const replacement = FakeWebSocket.instances[1];
       if (!replacement) throw new Error("Expected replacement signal socket.");
       expect(replacement.relayMessageCount()).toBe(0);
-
       runtime.stop();
     });
-  } finally {
-    if (previousWindow) {
-      Object.defineProperty(globalThis, "window", previousWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
+  });
 });
 
 test("receiver restart resets an in-flight relay transfer when progress is unchanged", async () => {
-  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: { __P2PFILE_TEST_FALLBACK__: true, location: { origin: "http://localhost" } },
-  });
-
-  try {
+  await withRelayOnlyWindow(async () => {
     await withSenderHarness(undefined, async ({ errors, socket, settle }) => {
       const file = new File([new Uint8Array(MANIFEST_CHUNK_BYTES * 2)], "large.zip", {
         type: "application/zip",
@@ -784,10 +816,7 @@ test("receiver restart resets an in-flight relay transfer when progress is uncha
               acknowledged.add(message);
               const decoded = decodeBinaryRelayChunkFrame(message);
               if (decoded) {
-                socket().receive({
-                  type: "relay-ack",
-                  payload: { sequence: decoded.sequence },
-                });
+                socket().receive({ type: "relay-ack", payload: { sequence: decoded.sequence } });
               }
               continue;
             }
@@ -865,11 +894,5 @@ test("receiver restart resets an in-flight relay transfer when progress is uncha
       expect(errors).toEqual([]);
       runtime.stop();
     });
-  } finally {
-    if (previousWindow) {
-      Object.defineProperty(globalThis, "window", previousWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
+  });
 });

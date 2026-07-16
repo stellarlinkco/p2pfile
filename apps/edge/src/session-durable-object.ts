@@ -382,20 +382,24 @@ export class SessionDurableObject implements DurableObject {
         }),
       );
     };
+    const peerRole = role === "sender" ? "receiver" : "sender";
+    const peer = this.sockets[peerRole];
+    const peerOpen = peer?.readyState === WebSocket.OPEN;
+    const relayPeerReady =
+      peerOpen &&
+      (role !== "sender" || session.relayReadyGeneration === session.receiverGeneration);
+
     if (wire.kind === "binary") {
       // Opaque binary relay frames (chunk payloads) are forwarded in-flight only.
+      // Never silently drop: a missing delivery path must nack so the sender can recover.
       if (role === "sender") {
         const sequence = relaySequenceFromBinaryWire(wire.bytes);
-        if (
-          sequence !== null &&
-          (!this.sockets.receiver || session.relayReadyGeneration !== session.receiverGeneration)
-        ) {
+        if (sequence !== null && !relayPeerReady) {
           rejectRelay(sequence);
           return;
         }
       }
-      const peer = this.sockets[role === "sender" ? "receiver" : "sender"];
-      if (peer?.readyState === WebSocket.OPEN) peer.send(wire.bytes);
+      if (peerOpen) peer.send(wire.bytes);
       return;
     }
 
@@ -414,7 +418,7 @@ export class SessionDurableObject implements DurableObject {
       return;
     }
     if (role === "sender" && envelope.type === "relay-message") {
-      if (!this.sockets.receiver || session.relayReadyGeneration !== session.receiverGeneration) {
+      if (!relayPeerReady) {
         rejectRelay(envelope.payload.sequence);
         return;
       }
@@ -427,7 +431,6 @@ export class SessionDurableObject implements DurableObject {
       session.relayReadyGeneration = session.receiverGeneration;
       void this.persistSession(session);
     }
-    const peer = this.sockets[role === "sender" ? "receiver" : "sender"];
-    if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify(envelope));
+    if (peerOpen) peer.send(JSON.stringify(envelope));
   }
 }

@@ -124,13 +124,15 @@ export async function createSession(
   await page.getByTestId("create-session-button").click();
 
   const manifest = page.getByTestId("frozen-manifest");
-  await expect(manifest).toBeVisible();
+  await expect(manifest).toBeVisible({ timeout: 15_000 });
   for (const file of files) {
     await expect(manifest).toContainText(file.name);
   }
-  await expect(page.getByTestId("share-link")).toBeVisible();
-  await expect(page.getByTestId("access-code")).toBeVisible();
-  await expect(page.getByTestId("qr-code")).toBeVisible();
+  // Session create is network-bound through the signal service; give the share
+  // surface more than the default 5s so a single slow response is not a flake.
+  await expect(page.getByTestId("share-link")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId("access-code")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId("qr-code")).toBeVisible({ timeout: 15_000 });
   const qrImage = page.getByTestId("qr-code").getByRole("img", {
     name: "QR Code for Share Link",
   });

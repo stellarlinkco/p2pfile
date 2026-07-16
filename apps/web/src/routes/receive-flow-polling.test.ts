@@ -5,6 +5,8 @@ import type { ReceiverRuntime } from "../lib/transfer";
 import {
   isReceiverRuntimeActive,
   isReceiverRuntimeEstablished,
+  nextStageAfterSenderRecovery,
+  nextStatusAfterSenderRecovery,
   receiverStageForReconnectingPoll,
   reconnectingProgressFromCurrent,
   shouldEndFromSenderEndedPoll,
@@ -134,6 +136,46 @@ test("reconnecting poll clears stale status after active receiving recovers", ()
   } satisfies SessionPublicView;
 
   expect(shouldRecoverFromReconnectingPoll("receiving", activeSession)).toBe(true);
+});
+
+test("completed-view session is not treated as sender recovery after signal reconnect", () => {
+  // Production counterexample: transfer finished and completeSession landed, but a
+  // 1s poll still held stage "receiving" and overwrote Completed Session View.
+  const completedSession = {
+    ...reconnectingSession(),
+    completed: true,
+    completedAt: new Date().toISOString(),
+    state: "completed-view",
+    status: "completed-view",
+  } satisfies SessionPublicView;
+
+  expect(shouldRecoverFromReconnectingPoll("receiving", completedSession)).toBe(false);
+  expect(shouldRecoverFromReconnectingPoll("reconnecting", completedSession)).toBe(false);
+});
+
+test("in-flight recovery poll does not downgrade terminal completed or ended stages", () => {
+  expect(nextStageAfterSenderRecovery("completed", "receiving")).toBe("completed");
+  expect(nextStageAfterSenderRecovery("completion-notice", "manifest")).toBe("completion-notice");
+  expect(nextStageAfterSenderRecovery("ended", "receiving")).toBe("ended");
+  expect(nextStageAfterSenderRecovery("retry-exhausted", "manifest")).toBe("retry-exhausted");
+  expect(nextStageAfterSenderRecovery("receiving", "receiving")).toBe("receiving");
+  expect(nextStageAfterSenderRecovery("reconnecting", "manifest")).toBe("manifest");
+
+  expect(
+    nextStatusAfterSenderRecovery(
+      "Completed Session View：全部文件已接收并通过字节数校验。",
+      "发送方已重新连接，继续接收中。",
+    ),
+  ).toBe("Completed Session View：全部文件已接收并通过字节数校验。");
+  expect(
+    nextStatusAfterSenderRecovery(
+      "Sender-Ended Session：发送方已离开，请请求重新创建会话。",
+      "发送方已重新连接：请继续接收。",
+    ),
+  ).toBe("Sender-Ended Session：发送方已离开，请请求重新创建会话。");
+  expect(nextStatusAfterSenderRecovery("Receiving file", "发送方已重新连接，继续接收中。")).toBe(
+    "发送方已重新连接，继续接收中。",
+  );
 });
 
 test("polling reconnecting session preserves current active per-file progress", () => {

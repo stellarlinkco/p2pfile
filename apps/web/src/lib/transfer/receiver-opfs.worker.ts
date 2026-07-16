@@ -3,8 +3,9 @@
 import type { FileManifestItem } from "@p2pfile/shared";
 import { OpfsFileCore, type OpfsSyncAccessHandle } from "./receiver-opfs-core";
 import {
+  classifyOpfsWorkerFailure,
+  enqueueExclusiveCommand,
   type OpfsWorkerCommand,
-  type OpfsWorkerFailureCode,
   type OpfsWorkerResponse,
   opfsPartName,
 } from "./receiver-opfs-worker-protocol";
@@ -25,21 +26,13 @@ let active:
       core: OpfsFileCore;
     }
   | undefined;
-
-function classifyFailure(error: unknown): OpfsWorkerFailureCode {
-  if (error instanceof DOMException) {
-    if (error.name === "QuotaExceededError") return "quota";
-    if (error.name === "NoModificationAllowedError") return "locked";
-    if (error.name === "NotSupportedError") return "unsupported";
-  }
-  if (error instanceof Error) {
-    if (error.message.includes("could not be restored")) return "invalid";
-    if (error.message.includes("flush")) return "flush";
-    if (error.message.includes("write") || error.message.includes("chunk")) return "write";
-    if (error.message.includes("invalid") || error.message.includes("incomplete")) return "invalid";
-  }
-  return "worker";
-}
+/**
+ * Chromium FileSystemSyncAccessHandle is exclusive: only one op may touch the
+ * handle at a time. The previous fire-and-forget message handler allowed a
+ * timer flush to race a write and surface:
+ * "state cached in an interface object was made but the state had changed..."
+ */
+let commandChain: Promise<void> = Promise.resolve();
 
 function post(response: OpfsWorkerResponse) {
   scope.postMessage(response);
@@ -154,21 +147,27 @@ async function handle(command: OpfsWorkerCommand) {
 
 scope.addEventListener("message", (event: MessageEvent<OpfsWorkerCommand>) => {
   const command = event.data;
-  void handle(command).catch((error) => {
-    active?.core.close();
-    active = undefined;
-    post({
-      type: "error",
-      requestId: command.requestId,
-      generation: command.generation,
-      fileId:
-        command.type === "open"
-          ? command.file.id
-          : "fileId" in command
-            ? (command.fileId ?? null)
-            : null,
-      code: classifyFailure(error),
-      message: error instanceof Error ? error.message : "Large-file storage failed.",
-    });
-  });
+  // Serialize every command so SyncAccessHandle ops never overlap, even when
+  // the main thread posts a timer flush while a write response is in flight.
+  commandChain = enqueueExclusiveCommand(
+    commandChain,
+    () => handle(command),
+    (error) => {
+      active?.core.close();
+      active = undefined;
+      post({
+        type: "error",
+        requestId: command.requestId,
+        generation: command.generation,
+        fileId:
+          command.type === "open"
+            ? command.file.id
+            : "fileId" in command
+              ? (command.fileId ?? null)
+              : null,
+        code: classifyOpfsWorkerFailure(error),
+        message: error instanceof Error ? error.message : "Large-file storage failed.",
+      });
+    },
+  );
 });

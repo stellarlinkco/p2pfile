@@ -17,8 +17,8 @@ type SenderEndedPollingOptions = {
   setSession: (session: SessionPublicView | null) => void;
   setProgress: Dispatch<SetStateAction<TransferProgress>>;
   setMode: (mode: TransferMode | null) => void;
-  setStage: (stage: ReceiverStage) => void;
-  setStatus: (status: string) => void;
+  setStage: Dispatch<SetStateAction<ReceiverStage>>;
+  setStatus: Dispatch<SetStateAction<string>>;
 };
 
 export function shouldStopReceiverRuntimeForReconnectingPoll(stage: ReceiverStage) {
@@ -66,16 +66,50 @@ export function shouldRecoverFromReconnectingPoll(
   stage: ReceiverStage,
   session: SessionPublicView,
 ) {
+  // completed-view must not be treated as "sender is back" recovery; doing so
+  // overwrites stage "completed" and hides Completed Session View after a
+  // mid-transfer sender signal reconnect.
   return (
     (stage === "reconnecting" || stage === "receiving") &&
     session.status !== "reconnecting" &&
     session.status !== "ended" &&
-    !session.ended
+    session.status !== "completed-view" &&
+    !session.ended &&
+    !session.completed
   );
 }
 
 export function shouldEndFromSenderEndedPoll(session: SessionPublicView) {
   return session.status === "ended" || session.ended;
+}
+
+const TERMINAL_RECEIVER_STAGES = new Set<ReceiverStage>([
+  "completed",
+  "completion-notice",
+  "ended",
+  "retry-exhausted",
+]);
+
+/**
+ * An in-flight getSession poll must not downgrade a stage that already reached
+ * a terminal UI state while the network request was outstanding.
+ */
+export function nextStageAfterSenderRecovery(
+  current: ReceiverStage,
+  preferred: "manifest" | "receiving",
+): ReceiverStage {
+  return TERMINAL_RECEIVER_STAGES.has(current) ? current : preferred;
+}
+
+export function nextStatusAfterSenderRecovery(current: string, preferred: string): string {
+  if (
+    current.startsWith("Completed Session View") ||
+    current.startsWith("Sender-Ended Session") ||
+    current.startsWith("Completion Notice")
+  ) {
+    return current;
+  }
+  return preferred;
 }
 
 export function reconnectingProgressFromCurrent(
@@ -135,13 +169,19 @@ export function useSenderEndedPolling({
         if (shouldRecoverFromReconnectingPoll(stage, latest)) {
           setSession(latest);
           setMode(latest.transferMode);
+          // Functional updates: an in-flight poll must not downgrade a stage that
+          // already reached completed/ended while this refresh was awaiting getSession.
           if (shouldRestartReceiverFromReconnectingPoll(stage, runtimeRef.current)) {
             stopReceiverRuntime(runtimeRef);
-            setStage("manifest");
-            setStatus("发送方已重新连接：请继续接收。");
+            setStage((current) => nextStageAfterSenderRecovery(current, "manifest"));
+            setStatus((current) =>
+              nextStatusAfterSenderRecovery(current, "发送方已重新连接：请继续接收。"),
+            );
           } else {
-            setStage("receiving");
-            setStatus("发送方已重新连接，继续接收中。");
+            setStage((current) => nextStageAfterSenderRecovery(current, "receiving"));
+            setStatus((current) =>
+              nextStatusAfterSenderRecovery(current, "发送方已重新连接，继续接收中。"),
+            );
           }
           return;
         }

@@ -29,21 +29,19 @@ const RELEASE_STATUSES: Record<ReleaseSessionStatus, true> = {
 };
 
 function requestOrigin() {
-  if (typeof window === "undefined") {
-    return "http://127.0.0.1:3001";
-  }
-
+  // Prefer an explicit signal origin (production split deploy / custom E2E).
   const configuredOrigin = import.meta.env?.VITE_SIGNAL_ORIGIN;
   if (typeof configuredOrigin === "string" && configuredOrigin.length > 0) {
     return configuredOrigin;
   }
 
-  const url = new URL(window.location.origin);
-  if (url.port === "4173") {
-    url.port = "3001";
+  // Browser default: same-origin. Local Vite proxies /api and /ws to signal so
+  // session create never depends on fragile port rewriting.
+  if (typeof window !== "undefined" && typeof window.location?.origin === "string") {
+    return window.location.origin;
   }
 
-  return url.origin;
+  return "http://127.0.0.1:3001";
 }
 
 function asObject(value: unknown) {

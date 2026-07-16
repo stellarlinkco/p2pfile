@@ -1,10 +1,20 @@
 import { afterEach, expect, test } from "bun:test";
-import { claimSession, completeSession, releaseSession } from "./runtime";
+import { claimSession, completeSession, getApiOrigin, releaseSession } from "./runtime";
 
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test("browser API origin defaults to same-origin so Vite can proxy signal routes", () => {
+  // Without an explicit VITE_SIGNAL_ORIGIN, browser requests must stay on the
+  // page origin. Port rewriting to :3001 is intentionally not required.
+  const origin = getApiOrigin();
+  expect(typeof origin).toBe("string");
+  expect(origin.length).toBeGreaterThan(0);
+  // In bun unit tests there is no browser window, so fallback is local signal.
+  expect(origin).toBe("http://127.0.0.1:3001");
 });
 
 const sessionPayload = (state: "claimed" | "failed") => ({

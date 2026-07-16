@@ -175,12 +175,31 @@ export async function pumpDataChannelSend(
 }
 
 export function sendSignal(ws: WebSocket, message: BrowserSignalMessage | ArrayBuffer | string) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  if (typeof message === "string" || message instanceof ArrayBuffer) {
-    ws.send(message);
-    return;
+  if (ws.readyState !== WebSocket.OPEN) {
+    throw new Error("Relay signaling disconnected.");
   }
-  ws.send(JSON.stringify(message));
+  try {
+    if (typeof message === "string" || message instanceof ArrayBuffer) {
+      ws.send(message);
+      return;
+    }
+    ws.send(JSON.stringify(message));
+  } catch (error) {
+    throw error instanceof Error ? error : new Error("Relay signaling disconnected.");
+  }
+}
+
+/** Best-effort control-plane send; ICE/mode announcements must not crash the runtime. */
+export function trySendSignal(
+  ws: WebSocket,
+  message: BrowserSignalMessage | ArrayBuffer | string,
+): boolean {
+  try {
+    sendSignal(ws, message);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function sendDataChannelPayload(channel: RTCDataChannel, data: string | ArrayBuffer) {
@@ -384,7 +403,7 @@ export function makePeerConnection(
 
   pc.addEventListener("icecandidate", (event) => {
     if (event.candidate) {
-      sendSignal(ws, { type: "ice-candidate", payload: event.candidate.toJSON() });
+      trySendSignal(ws, { type: "ice-candidate", payload: event.candidate.toJSON() });
     }
   });
 
@@ -392,7 +411,7 @@ export function makePeerConnection(
     if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
       applyMode(connectedMode, handlers);
       if (connectedMode === "direct") {
-        sendSignal(ws, { type: "mode", payload: { mode: "direct" } });
+        trySendSignal(ws, { type: "mode", payload: { mode: "direct" } });
       }
       void collectTransportDiagnostics(pc, connectedMode, options?.iceTransportPolicy).then(
         (diagnostics) => {
